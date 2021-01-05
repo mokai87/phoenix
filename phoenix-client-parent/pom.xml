@@ -48,7 +48,15 @@
           <skip>true</skip>
         </configuration>
       </plugin>
-
+      <plugin>
+        <!-- RAT gets really confused on the phoenix-client subprojects,
+        and there is nothing to audit here -->
+        <groupId>org.apache.rat</groupId>
+        <artifactId>apache-rat-plugin</artifactId>
+        <configuration>
+          <skip>true</skip>
+        </configuration>
+      </plugin>
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-jar-plugin</artifactId>
@@ -202,6 +210,18 @@
             <relocation>
               <pattern>javax/ws/</pattern>
               <shadedPattern>${shaded.package}.javax.ws.</shadedPattern>
+            </relocation>
+            <relocation>
+              <pattern>javax/annotation/</pattern>
+              <shadedPattern>${shaded.package}.javax.annotation.</shadedPattern>
+            </relocation>
+            <relocation>
+              <pattern>javax/inject/</pattern>
+              <shadedPattern>${shaded.package}.javax.inject.</shadedPattern>
+            </relocation>
+            <relocation>
+              <pattern>javax/validation/</pattern>
+              <shadedPattern>${shaded.package}.javax.validation.</shadedPattern>
             </relocation>
             <relocation>
               <pattern>net/</pattern>

@@ -84,6 +84,8 @@ import org.apache.phoenix.schema.RowValueConstructorOffsetNotCoercibleException;
 import org.apache.phoenix.schema.TableNotFoundException;
 import org.apache.phoenix.schema.TableRef;
 import org.apache.phoenix.util.EnvironmentEdgeManager;
+import org.apache.phoenix.util.ParseNodeUtil;
+import org.apache.phoenix.util.ParseNodeUtil.RewriteResult;
 import org.apache.phoenix.util.QueryUtil;
 import org.apache.phoenix.util.ScanUtil;
 
@@ -390,7 +392,14 @@ public class QueryCompiler {
                     joinExpressions[i] = joinConditions.getFirst();
                     List<Expression> hashExpressions = joinConditions.getSecond();
                     Pair<Expression, Expression> keyRangeExpressions = new Pair<Expression, Expression>(null, null);
-                    boolean optimized = getKeyExpressionCombinations(keyRangeExpressions, context, joinTable.getStatement(), tableRef, joinSpec.getType(), joinExpressions[i], hashExpressions);
+                    boolean optimized = getKeyExpressionCombinations(
+                            keyRangeExpressions,
+                            context,
+                            joinTable.getOriginalJoinSelectStatement(),
+                            tableRef,
+                            joinSpec.getType(),
+                            joinExpressions[i],
+                            hashExpressions);
                     Expression keyRangeLhsExpression = keyRangeExpressions.getFirst();
                     Expression keyRangeRhsExpression = keyRangeExpressions.getSecond();
                     joinTypes[i] = joinSpec.getType();
@@ -417,7 +426,7 @@ public class QueryCompiler {
                 }
                 HashJoinInfo joinInfo = new HashJoinInfo(projectedTable, joinIds, joinExpressions, joinTypes,
                         starJoinVector, tables, fieldPositions, postJoinFilterExpression, QueryUtil.getOffsetLimit(limit, offset));
-                return HashJoinPlan.create(joinTable.getStatement(), plan, joinInfo, hashPlans);
+                return HashJoinPlan.create(joinTable.getOriginalJoinSelectStatement(), plan, joinInfo, hashPlans);
             }
             case HASH_BUILD_LEFT: {
                 JoinSpec lastJoinSpec = joinSpecs.get(joinSpecs.size() - 1);
@@ -480,10 +489,29 @@ public class QueryCompiler {
                 HashJoinInfo joinInfo = new HashJoinInfo(projectedTable, joinIds, new List[]{joinExpressions},
                         new JoinType[]{type == JoinType.Right ? JoinType.Left : type}, new boolean[]{true},
                         new PTable[]{lhsTable}, new int[]{fieldPosition}, postJoinFilterExpression, QueryUtil.getOffsetLimit(limit, offset));
-                boolean usePersistentCache = joinTable.getStatement().getHint().hasHint(Hint.USE_PERSISTENT_CACHE);
+                boolean usePersistentCache = joinTable.getOriginalJoinSelectStatement().getHint().hasHint(Hint.USE_PERSISTENT_CACHE);
                 Pair<Expression, Expression> keyRangeExpressions = new Pair<Expression, Expression>(null, null);
-                getKeyExpressionCombinations(keyRangeExpressions, context, joinTable.getStatement(), rhsTableRef, type, joinExpressions, hashExpressions);
-                return HashJoinPlan.create(joinTable.getStatement(), rhsPlan, joinInfo, new HashSubPlan[]{new HashSubPlan(0, lhsPlan, hashExpressions, false, usePersistentCache, keyRangeExpressions.getFirst(), keyRangeExpressions.getSecond())});
+                getKeyExpressionCombinations(
+                        keyRangeExpressions,
+                        context,
+                        joinTable.getOriginalJoinSelectStatement(),
+                        rhsTableRef,
+                        type,
+                        joinExpressions,
+                        hashExpressions);
+                return HashJoinPlan.create(
+                        joinTable.getOriginalJoinSelectStatement(),
+                        rhsPlan,
+                        joinInfo,
+                        new HashSubPlan[]{
+                                new HashSubPlan(
+                                        0,
+                                        lhsPlan,
+                                        hashExpressions,
+                                        false,
+                                        usePersistentCache,
+                                        keyRangeExpressions.getFirst(),
+                                        keyRangeExpressions.getSecond())});
             }
             case SORT_MERGE: {
                 JoinTable lhsJoin =  joinTable.createSubJoinTable(statement.getConnection());
@@ -523,13 +551,13 @@ public class QueryCompiler {
                 int fieldPosition = needsMerge ? lhsProjTable.getColumns().size() - lhsProjTable.getPKColumns().size() : 0;
                 PTable projectedTable = needsMerge ? JoinCompiler.joinProjectedTables(lhsProjTable, rhsProjTable, type == JoinType.Right ? JoinType.Left : type) : lhsProjTable;
 
-                ColumnResolver resolver = FromCompiler.getResolverForProjectedTable(projectedTable, context.getConnection(), joinTable.getStatement().getUdfParseNodes());
+                ColumnResolver resolver = FromCompiler.getResolverForProjectedTable(projectedTable, context.getConnection(), joinTable.getOriginalJoinSelectStatement().getUdfParseNodes());
                 TableRef tableRef = resolver.getTables().get(0);
                 StatementContext subCtx = new StatementContext(statement, resolver, context.getBindManager(), ScanUtil.newScan(originalScan), new SequenceManager(statement));
                 subCtx.setCurrentTable(tableRef);
                 QueryPlan innerPlan = new SortMergeJoinPlan(
                         subCtx,
-                        joinTable.getStatement(),
+                        joinTable.getOriginalJoinSelectStatement(),
                         tableRef,
                         type == JoinType.Right ? JoinType.Left : type,
                         lhsPlan,
@@ -546,12 +574,27 @@ public class QueryCompiler {
                 context.setResolver(resolver);
                 TableNode from = NODE_FACTORY.namedTable(tableRef.getTableAlias(), NODE_FACTORY.table(tableRef.getTable().getSchemaName().getString(), tableRef.getTable().getTableName().getString()));
                 ParseNode where = joinTable.getPostFiltersCombined();
-                SelectStatement select = asSubquery
-                        ? NODE_FACTORY.select(from, joinTable.getStatement().getHint(), false,
-                        Collections.<AliasedNode>emptyList(), where, null, null, orderBy, null, null, 0, false,
-                        joinTable.getStatement().hasSequence(), Collections.<SelectStatement>emptyList(),
-                        joinTable.getStatement().getUdfParseNodes())
-                        : NODE_FACTORY.select(joinTable.getStatement(), from, where);
+                SelectStatement select = asSubquery ?
+                        NODE_FACTORY.select(
+                                from,
+                                joinTable.getOriginalJoinSelectStatement().getHint(),
+                                false,
+                                Collections.<AliasedNode>emptyList(),
+                                where,
+                                null,
+                                null,
+                                orderBy,
+                                null,
+                                null,
+                                0,
+                                false,
+                                joinTable.getOriginalJoinSelectStatement().hasSequence(),
+                                Collections.<SelectStatement>emptyList(),
+                                joinTable.getOriginalJoinSelectStatement().getUdfParseNodes()) :
+                         NODE_FACTORY.select(
+                                 joinTable.getOriginalJoinSelectStatement(),
+                                 from,
+                                 where);
 
                 return compileSingleFlatQuery(
                         context,
@@ -602,24 +645,29 @@ public class QueryCompiler {
         return type == JoinType.Semi && complete;
     }
 
-    protected QueryPlan compileSubquery(SelectStatement subquery, boolean pushDownMaxRows) throws SQLException {
-        PhoenixConnection connection = this.statement.getConnection();
-        subquery = SubselectRewriter.flatten(subquery, connection);
-        ColumnResolver resolver = FromCompiler.getResolverForQuery(subquery, connection);
-        subquery = StatementNormalizer.normalize(subquery, resolver);
-        SelectStatement transformedSubquery = SubqueryRewriter.transform(subquery, resolver, connection);
-        if (transformedSubquery != subquery) {
-            resolver = FromCompiler.getResolverForQuery(transformedSubquery, connection);
-            subquery = StatementNormalizer.normalize(transformedSubquery, resolver);
-        }
+    protected QueryPlan compileSubquery(
+            SelectStatement subquerySelectStatement,
+            boolean pushDownMaxRows) throws SQLException {
+        PhoenixConnection phoenixConnection = this.statement.getConnection();
+        RewriteResult rewriteResult =
+                ParseNodeUtil.rewrite(subquerySelectStatement, phoenixConnection);
         int maxRows = this.statement.getMaxRows();
         this.statement.setMaxRows(pushDownMaxRows ? maxRows : 0); // overwrite maxRows to avoid its impact on inner queries.
-        QueryPlan plan = new QueryCompiler(this.statement, subquery, resolver, bindManager, false, optimizeSubquery, null).compile();
+        QueryPlan queryPlan = new QueryCompiler(
+                this.statement,
+                rewriteResult.getRewrittenSelectStatement(),
+                rewriteResult.getColumnResolver(),
+                bindManager,
+                false,
+                optimizeSubquery,
+                null).compile();
         if (optimizeSubquery) {
-            plan = statement.getConnection().getQueryServices().getOptimizer().optimize(statement, plan);
+            queryPlan = statement.getConnection().getQueryServices().getOptimizer().optimize(
+                    statement,
+                    queryPlan);
         }
         this.statement.setMaxRows(maxRows); // restore maxRows.
-        return plan;
+        return queryPlan;
     }
 
     protected QueryPlan compileSingleQuery(StatementContext context, SelectStatement select, List<Object> binds, boolean asSubquery, boolean allowPageFilter) throws SQLException{

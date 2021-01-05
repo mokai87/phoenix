@@ -22,7 +22,6 @@ import static org.apache.phoenix.util.NumberUtil.add;
 import java.io.IOException;
 import java.sql.ParameterMetaData;
 import java.sql.SQLException;
-import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Iterator;
 import java.util.LinkedHashSet;
@@ -33,9 +32,12 @@ import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.client.Scan;
 import org.apache.hadoop.hbase.io.ImmutableBytesWritable;
+import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.Pair;
 import org.apache.phoenix.cache.ServerCacheClient;
 import org.apache.phoenix.cache.ServerCacheClient.ServerCache;
+import org.apache.phoenix.compile.ExplainPlanAttributes
+    .ExplainPlanAttributesBuilder;
 import org.apache.phoenix.compile.GroupByCompiler.GroupBy;
 import org.apache.phoenix.compile.OrderByCompiler.OrderBy;
 import org.apache.phoenix.coprocessor.BaseScannerRegionObserver;
@@ -277,7 +279,22 @@ public class DeleteCompiler {
 
             // If auto flush is true, this last batch will be committed upon return
             int nCommittedRows = autoFlush ? (rowCount / batchSize * batchSize) : 0;
-            MutationState state = new MutationState(tableRef, mutations, nCommittedRows, maxSize, maxSizeBytes, connection);
+
+            // tableRef can be index if the index table is selected by the query plan or if we do the DELETE
+            // directly on the index table. In other cases it refers to the data table
+            MutationState tableState =
+                new MutationState(tableRef, mutations, nCommittedRows, maxSize, maxSizeBytes, connection);
+            MutationState state;
+            if (otherTableRefs.isEmpty()) {
+                state = tableState;
+            } else {
+                state = new MutationState(maxSize, maxSizeBytes, connection);
+                // if there are other table references we need to start with an empty mutation state and
+                // then join the other states. We only need to count the data table rows that will be deleted.
+                // MutationState.join() correctly maintains that accounting and ignores the index table rows.
+                // This way we always return the correct number of rows that are deleted.
+                state.join(tableState);
+            }
             for (int i = 0; i < otherTableRefs.size(); i++) {
                 MutationState indexState = new MutationState(otherTableRefs.get(i), otherMutations.get(i), 0, maxSize, maxSizeBytes, connection);
                 state.join(indexState);
@@ -335,7 +352,7 @@ public class DeleteCompiler {
         return Collections.emptyList();
     }
     
-    private class MultiRowDeleteMutationPlan implements MutationPlan {
+    public class MultiRowDeleteMutationPlan implements MutationPlan {
         private final List<MutationPlan> plans;
         private final MutationPlan firstPlan;
         private final QueryPlan dataPlan;
@@ -605,7 +622,7 @@ public class DeleteCompiler {
             final int offset = table.getBucketNum() == null ? 0 : 1;
             Iterator<PColumn> projectedColsItr = projectedColumns.iterator();
             int i = 0;
-            while(projectedColsItr.hasNext()) {
+            while (projectedColsItr.hasNext()) {
                 final int position = i++;
                 adjustedProjectedColumns.add(new DelegateColumn(projectedColsItr.next()) {
                     @Override
@@ -726,7 +743,7 @@ public class DeleteCompiler {
         }
     }
 
-    private class ServerSelectDeleteMutationPlan implements MutationPlan {
+    public class ServerSelectDeleteMutationPlan implements MutationPlan {
         private final StatementContext context;
         private final QueryPlan dataPlan;
         private final PhoenixConnection connection;
@@ -777,6 +794,7 @@ public class DeleteCompiler {
             ImmutableBytesWritable ptr = context.getTempPtr();
             PTable table = dataPlan.getTableRef().getTable();
             table.getIndexMaintainers(ptr, context.getConnection());
+            ScanUtil.setWALAnnotationAttributes(table, context.getScan());
             byte[] txState = table.isTransactional() ? connection.getMutationState().encodeTransaction() : ByteUtil.EMPTY_BYTE_ARRAY;
             ServerCache cache = null;
             try {
@@ -786,6 +804,11 @@ public class DeleteCompiler {
                     context.getScan().setAttribute(PhoenixIndexCodec.INDEX_PROTO_MD, ptr.get());
                     context.getScan().setAttribute(BaseScannerRegionObserver.TX_STATE, txState);
                     ScanUtil.setClientVersion(context.getScan(), MetaDataProtocol.PHOENIX_VERSION);
+                    String sourceOfDelete = statement.getConnection().getSourceOfOperation();
+                    if (sourceOfDelete != null) {
+                        context.getScan().setAttribute(QueryServices.SOURCE_OPERATION_ATTRIB,
+                                Bytes.toBytes(sourceOfDelete));
+                    }
                 }
                 ResultIterator iterator = aggPlan.iterator();
                 try {
@@ -809,11 +832,18 @@ public class DeleteCompiler {
 
         @Override
         public ExplainPlan getExplainPlan() throws SQLException {
-            List<String> queryPlanSteps =  aggPlan.getExplainPlan().getPlanSteps();
-            List<String> planSteps = Lists.newArrayListWithExpectedSize(queryPlanSteps.size()+1);
+            ExplainPlan explainPlan = aggPlan.getExplainPlan();
+            List<String> queryPlanSteps = explainPlan.getPlanSteps();
+            ExplainPlanAttributes explainPlanAttributes =
+                explainPlan.getPlanStepsAsAttributes();
+            List<String> planSteps =
+                Lists.newArrayListWithExpectedSize(queryPlanSteps.size() + 1);
+            ExplainPlanAttributesBuilder newBuilder =
+                new ExplainPlanAttributesBuilder(explainPlanAttributes);
+            newBuilder.setAbstractExplainPlan("DELETE ROWS SERVER SELECT");
             planSteps.add("DELETE ROWS SERVER SELECT");
             planSteps.addAll(queryPlanSteps);
-            return new ExplainPlan(planSteps);
+            return new ExplainPlan(planSteps, newBuilder.build());
         }
 
         @Override
@@ -837,7 +867,7 @@ public class DeleteCompiler {
         }
     }
 
-    private class ClientSelectDeleteMutationPlan implements MutationPlan {
+    public class ClientSelectDeleteMutationPlan implements MutationPlan {
         private final StatementContext context;
         private final TableRef targetTableRef;
         private final QueryPlan dataPlan;
@@ -912,22 +942,8 @@ public class DeleteCompiler {
                         totalRowCount += PLong.INSTANCE.getCodec().decodeLong(kv.getValueArray(), kv.getValueOffset(), SortOrder.getDefault());
                     }
                     // Return total number of rows that have been deleted from the table. In the case of auto commit being off
-                    // the mutations will all be in the mutation state of the current connection. We need to divide by the
-                    // total number of tables we updated as otherwise the client will get an inflated result.
-                    int totalTablesUpdateClientSide = 1; // data table is always updated
-                    PTable bestTable = bestPlan.getTableRef().getTable();
-                    // global immutable tables are also updated client side (but don't double count the data table)
-                    if (bestPlan != dataPlan && isMaintainedOnClient(bestTable)) {
-                        totalTablesUpdateClientSide++;
-                    }
-                    for (TableRef otherTableRef : otherTableRefs) {
-                        PTable otherTable = otherTableRef.getTable();
-                        // Don't double count the data table here (which morphs when it becomes a projected table, hence this check)
-                        if (projectedTableRef != otherTableRef && isMaintainedOnClient(otherTable)) {
-                            totalTablesUpdateClientSide++;
-                        }
-                    }
-                    MutationState state = new MutationState(maxSize, maxSizeBytes, connection, totalRowCount/totalTablesUpdateClientSide);
+                    // the mutations will all be in the mutation state of the current connection.
+                    MutationState state = new MutationState(maxSize, maxSizeBytes, connection, totalRowCount);
 
                     // set the read metrics accumulated in the parent context so that it can be published when the mutations are committed.
                     state.setReadMetricQueue(context.getReadMetricsQueue());
@@ -945,11 +961,17 @@ public class DeleteCompiler {
 
         @Override
         public ExplainPlan getExplainPlan() throws SQLException {
-            List<String> queryPlanSteps =  bestPlan.getExplainPlan().getPlanSteps();
+            ExplainPlan explainPlan = bestPlan.getExplainPlan();
+            List<String> queryPlanSteps = explainPlan.getPlanSteps();
+            ExplainPlanAttributes explainPlanAttributes =
+                explainPlan.getPlanStepsAsAttributes();
             List<String> planSteps = Lists.newArrayListWithExpectedSize(queryPlanSteps.size()+1);
+            ExplainPlanAttributesBuilder newBuilder =
+                new ExplainPlanAttributesBuilder(explainPlanAttributes);
+            newBuilder.setAbstractExplainPlan("DELETE ROWS CLIENT SELECT");
             planSteps.add("DELETE ROWS CLIENT SELECT");
             planSteps.addAll(queryPlanSteps);
-            return new ExplainPlan(planSteps);
+            return new ExplainPlan(planSteps, newBuilder.build());
         }
 
         @Override

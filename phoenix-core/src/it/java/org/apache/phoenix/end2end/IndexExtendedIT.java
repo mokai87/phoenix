@@ -36,15 +36,18 @@ import java.util.Properties;
 
 import org.apache.hadoop.hbase.client.Table;
 import org.apache.hadoop.hbase.util.Bytes;
+import org.apache.phoenix.compat.hbase.coprocessor.CompatBaseScannerRegionObserver;
+import org.apache.phoenix.compile.ExplainPlan;
+import org.apache.phoenix.compile.ExplainPlanAttributes;
 import org.apache.phoenix.coprocessor.IndexRebuildRegionScanner;
 import org.apache.phoenix.jdbc.PhoenixConnection;
+import org.apache.phoenix.jdbc.PhoenixPreparedStatement;
 import org.apache.phoenix.mapreduce.index.IndexTool;
 import org.apache.phoenix.query.BaseTest;
 import org.apache.phoenix.query.QueryServices;
 import org.apache.phoenix.query.QueryServicesOptions;
 import org.apache.phoenix.schema.PIndexState;
 import org.apache.phoenix.util.PropertiesUtil;
-import org.apache.phoenix.util.QueryUtil;
 import org.apache.phoenix.util.ReadOnlyProps;
 import org.apache.phoenix.util.SchemaUtil;
 import org.junit.BeforeClass;
@@ -86,6 +89,7 @@ public class IndexExtendedIT extends BaseTest {
     public static synchronized void doSetup() throws Exception {
         Map<String, String> serverProps = Maps.newHashMapWithExpectedSize(2);
         serverProps.put(QueryServices.EXTRA_JDBC_ARGUMENTS_ATTRIB, QueryServicesOptions.DEFAULT_EXTRA_JDBC_ARGUMENTS);
+        serverProps.put(CompatBaseScannerRegionObserver.PHOENIX_MAX_LOOKBACK_AGE_CONF_KEY, Integer.toString(60*60)); // An hour
         Map<String, String> clientProps = Maps.newHashMapWithExpectedSize(2);
         clientProps.put(QueryServices.TRANSACTIONS_ENABLED, Boolean.TRUE.toString());
         clientProps.put(QueryServices.FORCE_ROW_KEY_ORDER_ATTRIB, Boolean.TRUE.toString());
@@ -149,14 +153,23 @@ public class IndexExtendedIT extends BaseTest {
             
             //verify rows are fetched from data table.
             String selectSql = String.format("SELECT ID FROM %s WHERE UPPER(NAME, 'en_US') ='UNAME2'",dataTableFullName);
-            ResultSet rs = conn.createStatement().executeQuery("EXPLAIN " + selectSql);
-            String actualExplainPlan = QueryUtil.getExplainPlan(rs);
-            
+
+            ExplainPlan plan = conn.prepareStatement(selectSql)
+                .unwrap(PhoenixPreparedStatement.class).optimizeQuery()
+                .getExplainPlan();
+            ExplainPlanAttributes explainPlanAttributes =
+                plan.getPlanStepsAsAttributes();
+            assertEquals("PARALLEL 1-WAY",
+                explainPlanAttributes.getIteratorTypeAndScanSize());
+            assertEquals("FULL SCAN ",
+                explainPlanAttributes.getExplainScanType());
             //assert we are pulling from data table.
-            assertEquals(String.format("CLIENT PARALLEL 1-WAY FULL SCAN OVER %s\n" +
-                    "    SERVER FILTER BY UPPER(NAME, 'en_US') = 'UNAME2'",dataTableFullName),actualExplainPlan);
-            
-            rs = stmt1.executeQuery(selectSql);
+            assertEquals(dataTableFullName,
+                explainPlanAttributes.getTableName());
+            assertEquals("SERVER FILTER BY UPPER(NAME, 'en_US') = 'UNAME2'",
+                explainPlanAttributes.getServerWhereFilter());
+
+            ResultSet rs = stmt1.executeQuery(selectSql);
             assertTrue(rs.next());
             assertEquals(2, rs.getInt(1));
             assertFalse(rs.next());
@@ -164,11 +177,17 @@ public class IndexExtendedIT extends BaseTest {
             //run the index MR job.
             IndexToolIT.runIndexTool(true, useSnapshot, schemaName, dataTableName, indexTableName);
             
+            plan = conn.prepareStatement(selectSql)
+                .unwrap(PhoenixPreparedStatement.class).optimizeQuery()
+                .getExplainPlan();
+            explainPlanAttributes =
+                plan.getPlanStepsAsAttributes();
             //assert we are pulling from index table.
-            rs = conn.createStatement().executeQuery("EXPLAIN " + selectSql);
-            actualExplainPlan = QueryUtil.getExplainPlan(rs);
-            IndexToolIT.assertExplainPlan(localIndex, actualExplainPlan, dataTableFullName, indexTableFullName);
-            
+            String expectedTableName = localIndex ? dataTableFullName
+                : indexTableFullName;
+            assertEquals(expectedTableName,
+                explainPlanAttributes.getTableName());
+
             rs = stmt.executeQuery(selectSql);
             assertTrue(rs.next());
             assertEquals(2, rs.getInt(1));
@@ -226,12 +245,22 @@ public class IndexExtendedIT extends BaseTest {
             // validate that delete markers were issued correctly and only ('a', '1', 'value1') was
             // deleted
             String query = "SELECT pk3 from " + dataTableFullName + " ORDER BY pk3";
-            ResultSet rs = conn.createStatement().executeQuery("EXPLAIN " + query);
-            String expectedPlan =
-                    "CLIENT PARALLEL 1-WAY FULL SCAN OVER " + indexTableFullName + "\n"
-                            + "    SERVER FILTER BY FIRST KEY ONLY";
-            assertEquals("Wrong plan ", expectedPlan, QueryUtil.getExplainPlan(rs));
-            rs = conn.createStatement().executeQuery(query);
+
+            ExplainPlan plan = conn.prepareStatement(query)
+                .unwrap(PhoenixPreparedStatement.class).optimizeQuery()
+                .getExplainPlan();
+            ExplainPlanAttributes explainPlanAttributes =
+                plan.getPlanStepsAsAttributes();
+            assertEquals("PARALLEL 1-WAY",
+                explainPlanAttributes.getIteratorTypeAndScanSize());
+            assertEquals("FULL SCAN ",
+                explainPlanAttributes.getExplainScanType());
+            assertEquals(indexTableFullName,
+                explainPlanAttributes.getTableName());
+            assertEquals("SERVER FILTER BY FIRST KEY ONLY",
+                explainPlanAttributes.getServerWhereFilter());
+
+            ResultSet rs = conn.createStatement().executeQuery(query);
             assertTrue(rs.next());
             assertEquals("2", rs.getString(1));
             assertTrue(rs.next());
@@ -349,15 +378,15 @@ public class IndexExtendedIT extends BaseTest {
             // Verify that the index table is not in the ACTIVE state
             assertFalse(checkIndexState(conn, indexFullName, PIndexState.ACTIVE, 0L));
 
-            // Run the index MR job and verify that the index table rebuild fails
-            IndexToolIT.runIndexTool(true, false, schemaName, dataTableName,
-                    indexTableName, null, -1, IndexTool.IndexVerifyType.AFTER);
+            if (CompatBaseScannerRegionObserver.isMaxLookbackTimeEnabled(getUtility().getConfiguration())) {
+                // Run the index MR job and verify that the index table rebuild fails
+                IndexToolIT.runIndexTool(true, false, schemaName, dataTableName,
+                        indexTableName, null, -1, IndexTool.IndexVerifyType.AFTER);
+                // job failed, verify that the index table is still not in the ACTIVE state
+                assertFalse(checkIndexState(conn, indexFullName, PIndexState.ACTIVE, 0L));
+            }
 
             IndexRebuildRegionScanner.setIgnoreIndexRebuildForTesting(false);
-
-            // job failed, verify that the index table is still not in the ACTIVE state
-            assertFalse(checkIndexState(conn, indexFullName, PIndexState.ACTIVE, 0L));
-
             // Run the index MR job and verify that the index table rebuild succeeds
             IndexToolIT.runIndexTool(true, false, schemaName, dataTableName,
                     indexTableName, null, 0, IndexTool.IndexVerifyType.AFTER);

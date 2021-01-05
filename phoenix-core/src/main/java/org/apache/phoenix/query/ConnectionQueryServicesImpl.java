@@ -122,6 +122,7 @@ import org.apache.commons.lang3.StringUtils;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.HRegionLocation;
+import org.apache.hadoop.hbase.HTableDescriptor;
 import org.apache.hadoop.hbase.KeepDeletedCells;
 import org.apache.hadoop.hbase.NamespaceDescriptor;
 import org.apache.hadoop.hbase.NamespaceNotFoundException;
@@ -133,6 +134,7 @@ import org.apache.hadoop.hbase.client.ClusterConnection;
 import org.apache.hadoop.hbase.client.ColumnFamilyDescriptor;
 import org.apache.hadoop.hbase.client.ColumnFamilyDescriptorBuilder;
 import org.apache.hadoop.hbase.client.Connection;
+import org.apache.hadoop.hbase.client.CoprocessorDescriptorBuilder;
 import org.apache.hadoop.hbase.client.Delete;
 import org.apache.hadoop.hbase.client.Increment;
 import org.apache.hadoop.hbase.client.Mutation;
@@ -171,6 +173,7 @@ import org.apache.phoenix.coprocessor.ScanRegionObserver;
 import org.apache.phoenix.coprocessor.SequenceRegionObserver;
 import org.apache.phoenix.coprocessor.ServerCachingEndpointImpl;
 import org.apache.phoenix.coprocessor.PhoenixTTLRegionObserver;
+import org.apache.phoenix.coprocessor.SystemCatalogRegionObserver;
 import org.apache.phoenix.coprocessor.TaskMetaDataEndpoint;
 import org.apache.phoenix.coprocessor.TaskRegionObserver;
 import org.apache.phoenix.coprocessor.UngroupedAggregateRegionObserver;
@@ -1137,6 +1140,12 @@ public class ConnectionQueryServicesImpl extends DelegateQueryServices implement
                 if (!newDesc.hasCoprocessor(PhoenixTTLRegionObserver.class.getName())) {
                     builder.addCoprocessor(
                             PhoenixTTLRegionObserver.class.getName(), null, priority-2, null);
+                }
+            }
+            if (Arrays.equals(tableName, SYSTEM_CATALOG_NAME_BYTES)) {
+                if (!newDesc.hasCoprocessor(SystemCatalogRegionObserver.class.getName())) {
+                    builder.addCoprocessor(
+                            SystemCatalogRegionObserver.class.getName(), null, priority, null);
                 }
             }
 
@@ -3760,19 +3769,23 @@ public class ConnectionQueryServicesImpl extends DelegateQueryServices implement
             metaConnection = addColumnsIfNotExists(
                 metaConnection,
                 PhoenixDatabaseMetaData.SYSTEM_CATALOG,
-                MIN_SYSTEM_TABLE_TIMESTAMP_4_16_0 - 2,
+                MIN_SYSTEM_TABLE_TIMESTAMP_4_16_0 - 3,
                 PhoenixDatabaseMetaData.PHOENIX_TTL + " "
                         + PInteger.INSTANCE.getSqlTypeName());
             metaConnection = addColumnsIfNotExists(
                 metaConnection,
                 PhoenixDatabaseMetaData.SYSTEM_CATALOG,
-                MIN_SYSTEM_TABLE_TIMESTAMP_4_16_0 - 1,
+                MIN_SYSTEM_TABLE_TIMESTAMP_4_16_0 - 2,
                 PhoenixDatabaseMetaData.PHOENIX_TTL_HWM + " "
                         + PInteger.INSTANCE.getSqlTypeName());
             metaConnection = addColumnsIfNotExists(metaConnection,
-                PhoenixDatabaseMetaData.SYSTEM_CATALOG, MIN_SYSTEM_TABLE_TIMESTAMP_4_16_0,
+                PhoenixDatabaseMetaData.SYSTEM_CATALOG, MIN_SYSTEM_TABLE_TIMESTAMP_4_16_0 -1,
                 PhoenixDatabaseMetaData.LAST_DDL_TIMESTAMP + " "
                     + PLong.INSTANCE.getSqlTypeName());
+            metaConnection = addColumnsIfNotExists(metaConnection,
+                PhoenixDatabaseMetaData.SYSTEM_CATALOG, MIN_SYSTEM_TABLE_TIMESTAMP_4_16_0,
+                PhoenixDatabaseMetaData.CHANGE_DETECTION_ENABLED
+                    + " " + PBoolean.INSTANCE.getSqlTypeName());
             UpgradeUtil.bootstrapLastDDLTimestamp(metaConnection);
 
             boolean isNamespaceMapping =
@@ -3795,6 +3808,28 @@ public class ConnectionQueryServicesImpl extends DelegateQueryServices implement
                         metaConnection, rowKey, tableBytes);
             } else {
                 LOGGER.info("Updating VIEW_INDEX_ID data type is not needed.");
+            }
+            try (Admin admin = metaConnection.getQueryServices().getAdmin()) {
+                TableDescriptorBuilder tdBuilder;
+                TableName sysCatPhysicalTableName = SchemaUtil.getPhysicalTableName(
+                    PhoenixDatabaseMetaData.SYSTEM_CATALOG_NAME, props);
+                tdBuilder = TableDescriptorBuilder.newBuilder(
+                    admin.getDescriptor(sysCatPhysicalTableName));
+                if (!tdBuilder.build().hasCoprocessor(
+                        SystemCatalogRegionObserver.class.getName())) {
+                    int priority = props.getInt(
+                        QueryServices.COPROCESSOR_PRIORITY_ATTRIB,
+                        QueryServicesOptions.DEFAULT_COPROCESSOR_PRIORITY);
+                    tdBuilder.setCoprocessor(
+                        CoprocessorDescriptorBuilder
+                            .newBuilder(SystemCatalogRegionObserver.class.getName())
+                            .setPriority(priority)
+                            .setProperties(Collections.emptyMap())
+                            .build());
+                    admin.modifyTable(tdBuilder.build());
+                    pollForUpdatedTableDescriptor(admin, tdBuilder.build(),
+                        sysCatPhysicalTableName.getName());
+                }
             }
         }
         return metaConnection;
@@ -3899,9 +3934,19 @@ public class ConnectionQueryServicesImpl extends DelegateQueryServices implement
                 if (currentServerSideTableTimeStamp < MIN_SYSTEM_TABLE_TIMESTAMP_4_15_0) {
                     moveChildLinks = true;
                     syncAllTableAndIndexProps = true;
+                }
+                if (currentServerSideTableTimeStamp < MIN_SYSTEM_TABLE_TIMESTAMP_4_16_0) {
                     //Combine view index id sequences for the same physical view index table
                     //to avoid collisions. See PHOENIX-5132 and PHOENIX-5138
-                    UpgradeUtil.mergeViewIndexIdSequences(this, metaConnection);
+                    try (PhoenixConnection conn = new PhoenixConnection(
+                            ConnectionQueryServicesImpl.this, globalUrl,
+                            props, newEmptyMetaData())) {
+                        UpgradeUtil.mergeViewIndexIdSequences(metaConnection);
+                    } catch (Exception mergeViewIndeIdException) {
+                        LOGGER.warn("Merge view index id sequence failed! If possible, " +
+                                "please run MergeViewIndexIdSequencesTool to avoid view index" +
+                                "id collision. Error: " + mergeViewIndeIdException.getMessage());
+                    }
                 }
             }
 
@@ -3944,28 +3989,21 @@ public class ConnectionQueryServicesImpl extends DelegateQueryServices implement
                     toThrow = e;
                 }
             } finally {
-                try {
-                    for (Map.Entry<String, String> tableToSnapshotEntrySet
-                            : systemTableToSnapshotMap.entrySet()) {
-                        restoreFromSnapshot(tableToSnapshotEntrySet.getKey(),
-                            tableToSnapshotEntrySet.getValue(), success);
-                    }
-                } catch (SQLException e) {
-                    if (toThrow != null) {
-                        toThrow.setNextException(e);
-                    } else {
-                        toThrow = e;
-                    }
-                } finally {
-                    if (acquiredMutexLock) {
-                        try {
-                            releaseUpgradeMutex();
-                        } catch (IOException e) {
-                            LOGGER.warn("Release of upgrade mutex failed ", e);
-                        }
+                if (!success) {
+                    LOGGER.warn("Failed upgrading System tables. " +
+                        "Snapshots for system tables created so far: {}",
+                        systemTableToSnapshotMap);
+                }
+                if (acquiredMutexLock) {
+                    try {
+                        releaseUpgradeMutex();
+                    } catch (IOException e) {
+                        LOGGER.warn("Release of upgrade mutex failed ", e);
                     }
                 }
-                if (toThrow != null) { throw toThrow; }
+                if (toThrow != null) {
+                    throw toThrow;
+                }
             }
         }
     }
@@ -4366,70 +4404,6 @@ public class ConnectionQueryServicesImpl extends DelegateQueryServices implement
             } finally {
                 if (sqlE != null) {
                     throw sqlE;
-                }
-            }
-        }
-    }
-
-    private void restoreFromSnapshot(String tableName, String snapshotName,
-            boolean success) throws SQLException {
-        boolean snapshotRestored = false;
-        boolean tableDisabled = false;
-        if (!success && snapshotName != null) {
-            SQLException sqlE = null;
-            Admin admin = null;
-            try {
-                LOGGER.warn("Starting restore of " + tableName + " using snapshot "
-                        + snapshotName + " because upgrade failed");
-                admin = getAdmin();
-                admin.disableTable(TableName.valueOf(tableName));
-                tableDisabled = true;
-                admin.restoreSnapshot(snapshotName);
-                snapshotRestored = true;
-                LOGGER.warn("Successfully restored " + tableName + " using snapshot "
-                        + snapshotName);
-            } catch (Exception e) {
-                sqlE = new SQLException(e);
-            } finally {
-                if (admin != null && tableDisabled) {
-                    try {
-                        admin.enableTable(TableName.valueOf(tableName));
-                        if (snapshotRestored) {
-                            LOGGER.warn("Successfully restored and enabled " + tableName + " using snapshot "
-                                    + snapshotName);
-                        } else {
-                            LOGGER.warn("Successfully enabled " + tableName + " after restoring using snapshot "
-                                    + snapshotName + " failed. ");
-                        }
-                    } catch (Exception e1) {
-                        SQLException enableTableEx = new SQLException(e1);
-                        if (sqlE == null) {
-                            sqlE = enableTableEx;
-                        } else {
-                            sqlE.setNextException(enableTableEx);
-                        }
-                        LOGGER.error("Failure in enabling "
-                                + tableName
-                                + (snapshotRestored ? " after successfully restoring using snapshot"
-                                        + snapshotName
-                                        : " after restoring using snapshot "
-                                                + snapshotName + " failed. "));
-                    } finally {
-                        try {
-                            admin.close();
-                        } catch (Exception e2) {
-                            SQLException adminCloseEx = new SQLException(e2);
-                            if (sqlE == null) {
-                                sqlE = adminCloseEx;
-                            } else {
-                                sqlE.setNextException(adminCloseEx);
-                            }
-                        } finally {
-                            if (sqlE != null) {
-                                throw sqlE;
-                            }
-                        }
-                    }
                 }
             }
         }

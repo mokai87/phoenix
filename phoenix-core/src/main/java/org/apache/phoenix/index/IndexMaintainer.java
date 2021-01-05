@@ -237,7 +237,7 @@ public class IndexMaintainer implements Writable, Iterable<ColumnReference> {
     
     /**
      * For client-side to append serialized IndexMaintainers of keyValueIndexes
-     * @param dataTable data table
+     * @param table data table
      * @param indexMetaDataPtr bytes pointer to hold returned serialized value
      * @param keyValueIndexes indexes to serialize
      */
@@ -380,6 +380,9 @@ public class IndexMaintainer implements Writable, Iterable<ColumnReference> {
      */
     private Map<ColumnReference, ColumnReference> coveredColumnsMap;
     /**** END: New member variables added in 4.10 *****/
+
+    //**** START: New member variables added in 4.16 ****/
+    private String logicalIndexName;
 
     private IndexMaintainer(RowKeySchema dataRowKeySchema, boolean isDataTableSalted) {
         this.dataRowKeySchema = dataRowKeySchema;
@@ -594,6 +597,7 @@ public class IndexMaintainer implements Writable, Iterable<ColumnReference> {
             }
         }
         this.estimatedIndexRowKeyBytes = estimateIndexRowKeyByteSize(indexColByteSize);
+        this.logicalIndexName = index.getName().getString();
         initCachedState();
     }
     
@@ -606,6 +610,7 @@ public class IndexMaintainer implements Writable, Iterable<ColumnReference> {
                         : regionEndKey.length) : 0; 
         TrustedByteArrayOutputStream stream = new TrustedByteArrayOutputStream(estimatedIndexRowKeyBytes + (prependRegionStartKey ? prefixKeyLength : 0));
         DataOutput output = new DataOutputStream(stream);
+
         try {
             // For local indexes, we must prepend the row key with the start region key
             if (prependRegionStartKey) {
@@ -660,6 +665,7 @@ public class IndexMaintainer implements Writable, Iterable<ColumnReference> {
             }
             BitSet descIndexColumnBitSet = rowKeyMetaData.getDescIndexColumnBitSet();
             Iterator<Expression> expressionIterator = indexedExpressions.iterator();
+            int trailingVariableWidthColumnNum = 0;
             for (int i = 0; i < nIndexedColumns; i++) {
                 PDataType dataColumnType;
                 boolean isNullable;
@@ -694,17 +700,26 @@ public class IndexMaintainer implements Writable, Iterable<ColumnReference> {
                         output.write(ptr.get(), ptr.getOffset(), ptr.getLength());
                     }
                 }
+
                 if (!indexColumnType.isFixedWidth()) {
-                    output.writeByte(SchemaUtil.getSeparatorByte(rowKeyOrderOptimizable, ptr.getLength() == 0, isIndexColumnDesc ? SortOrder.DESC : SortOrder.ASC));
+                    byte sepByte = SchemaUtil.getSeparatorByte(rowKeyOrderOptimizable, ptr.getLength() == 0, isIndexColumnDesc ? SortOrder.DESC : SortOrder.ASC);
+                    output.writeByte(sepByte);
+                    trailingVariableWidthColumnNum++;
+                } else {
+                    trailingVariableWidthColumnNum = 0;
                 }
             }
-            int length = stream.size();
-            int minLength = length - maxTrailingNulls;
             byte[] indexRowKey = stream.getBuffer();
             // Remove trailing nulls
-            while (length > minLength && indexRowKey[length-1] == QueryConstants.SEPARATOR_BYTE) {
+            int length = stream.size();
+            int minLength = length - maxTrailingNulls;
+            // The existing code does not eliminate the separator if the data type is not nullable. It not clear why.
+            // The actual bug is in the calculation of maxTrailingNulls with view indexes. So, in order not to impact some other cases, we should keep minLength check here.
+            while (trailingVariableWidthColumnNum > 0 && length > minLength && indexRowKey[length-1] == QueryConstants.SEPARATOR_BYTE) {
                 length--;
+                trailingVariableWidthColumnNum--;
             }
+
             if (isIndexSalted) {
                 // Set salt byte
                 byte saltByte = SaltingUtil.getSaltingByte(indexRowKey, SaltingUtil.NUM_SALTING_BYTES, length-SaltingUtil.NUM_SALTING_BYTES, nIndexSaltBuckets);
@@ -1258,7 +1273,18 @@ public class IndexMaintainer implements Writable, Iterable<ColumnReference> {
         // If if there are no covered columns, we know it's our default name
         return emptyKeyValueCFPtr;
     }
-    
+
+    /**
+     * The logical index name. For global indexes on base tables this will be the same as the
+     * physical index table name (unless namespaces are enabled, then . gets replaced with : for
+     * the physical table name). For view indexes, the logical and physical names will be
+     * different because all view indexes of a base table are stored in the same physical table
+     * @return The logical index name
+     */
+    public String getLogicalIndexName() {
+        return logicalIndexName;
+    }
+
     @Deprecated // Only called by code older than our 4.10 release
     @Override
     public void readFields(DataInput input) throws IOException {
@@ -1460,6 +1486,7 @@ public class IndexMaintainer implements Writable, Iterable<ColumnReference> {
             }
             maintainer.coveredColumnsMap.put(dataTableColRef, indexTableColRef);
         }
+        maintainer.logicalIndexName = proto.getLogicalIndexName();
         maintainer.initCachedState();
         return maintainer;
     }
@@ -1583,6 +1610,7 @@ public class IndexMaintainer implements Writable, Iterable<ColumnReference> {
         }
         builder.setEncodingScheme(maintainer.encodingScheme.getSerializedMetadataValue());
         builder.setImmutableStorageScheme(maintainer.immutableStorageScheme.getSerializedMetadataValue());
+        builder.setLogicalIndexName(maintainer.logicalIndexName);
         return builder.build();
     }
 
