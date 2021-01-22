@@ -17,6 +17,7 @@
  */
 package org.apache.phoenix.coprocessor;
 
+import static org.apache.phoenix.coprocessor.GlobalIndexRegionScanner.adjustScanFilter;
 import static org.apache.phoenix.query.QueryConstants.AGG_TIMESTAMP;
 import static org.apache.phoenix.query.QueryConstants.SINGLE_COLUMN;
 import static org.apache.phoenix.query.QueryConstants.SINGLE_COLUMN_FAMILY;
@@ -58,7 +59,6 @@ import org.apache.hadoop.hbase.coprocessor.ObserverContext;
 import org.apache.hadoop.hbase.coprocessor.RegionCoprocessor;
 import org.apache.hadoop.hbase.coprocessor.RegionCoprocessorEnvironment;
 import org.apache.hadoop.hbase.coprocessor.RegionObserver;
-import org.apache.hadoop.hbase.filter.FirstKeyOnlyFilter;
 import org.apache.hadoop.hbase.io.ImmutableBytesWritable;
 import org.apache.hadoop.hbase.ipc.RpcControllerFactory;
 import org.apache.hadoop.hbase.ipc.controller.InterRegionServerIndexRpcControllerFactory;
@@ -79,7 +79,6 @@ import org.apache.phoenix.exception.SQLExceptionCode;
 import org.apache.phoenix.execute.TupleProjector;
 import org.apache.phoenix.expression.Expression;
 import org.apache.phoenix.expression.ExpressionType;
-import org.apache.phoenix.filter.AllVersionsIndexRebuildFilter;
 import org.apache.phoenix.hbase.index.Indexer;
 import org.apache.phoenix.hbase.index.covered.update.ColumnReference;
 import org.apache.phoenix.hbase.index.exception.IndexWriteException;
@@ -260,7 +259,9 @@ public class UngroupedAggregateRegionObserver extends BaseScannerRegionObserver 
        Mutation[] mutationArray = new Mutation[mutations.size()];
       // When memstore size reaches blockingMemstoreSize we are waiting 3 seconds for the
       // flush happen which decrease the memstore size and then writes allowed on the region.
-      for (int i = 0; blockingMemstoreSize > 0 && region.getMemStoreHeapSize() > blockingMemstoreSize && i < 30; i++) {
+      for (int i = 0; blockingMemstoreSize > 0
+              && region.getMemStoreHeapSize() + region.getMemStoreOffHeapSize() > blockingMemstoreSize
+              && i < 30; i++) {
           try {
               checkForRegionClosingOrSplitting();
               Thread.sleep(100);
@@ -453,7 +454,7 @@ public class UngroupedAggregateRegionObserver extends BaseScannerRegionObserver 
         }
 
         if (j != null) {
-            theScanner = new HashJoinRegionScanner(theScanner, p, j, ScanUtil.getTenantId(scan), env, useQualifierAsIndex, useNewValueColumnQualifier);
+            theScanner = new HashJoinRegionScanner(theScanner, scan, p, j, ScanUtil.getTenantId(scan), env, useQualifierAsIndex, useNewValueColumnQualifier);
         }
         return new UngroupedAggregateRegionScanner(c, theScanner, region, scan, env, this);
     }
@@ -638,7 +639,7 @@ public class UngroupedAggregateRegionObserver extends BaseScannerRegionObserver 
         }
     }
 
-    private RegionScanner rebuildIndices(final RegionScanner innerScanner, final Region region, final Scan scan,
+    private RegionScanner rebuildIndices(RegionScanner innerScanner, final Region region, final Scan scan,
                                          final RegionCoprocessorEnvironment env) throws IOException {
         boolean oldCoproc = region.getTableDescriptor().hasCoprocessor(Indexer.class.getCanonicalName());
         byte[] valueBytes = scan.getAttribute(BaseScannerRegionObserver.INDEX_REBUILD_VERIFY_TYPE);
@@ -647,29 +648,28 @@ public class UngroupedAggregateRegionObserver extends BaseScannerRegionObserver 
         if (oldCoproc && verifyType == IndexTool.IndexVerifyType.ONLY) {
             return new IndexerRegionScanner(innerScanner, region, scan, env, this);
         }
+        RegionScanner scanner;
         if (!scan.isRaw()) {
             Scan rawScan = new Scan(scan);
             rawScan.setRaw(true);
             rawScan.readAllVersions();
             rawScan.getFamilyMap().clear();
-            // For rebuilds we use count (*) as query for regular tables which ends up setting the FKOF on scan
-            // This filter doesn't give us all columns and skips to the next row as soon as it finds 1 col
-            // For rebuilds we need all columns and all versions
-            if (scan.getFilter() instanceof FirstKeyOnlyFilter) {
-                rawScan.setFilter(null);
-            } else if (scan.getFilter() != null) {
-                // Override the filter so that we get all versions
-                rawScan.setFilter(new AllVersionsIndexRebuildFilter(scan.getFilter()));
-            }
+            adjustScanFilter(rawScan);
             rawScan.setCacheBlocks(false);
             for (byte[] family : scan.getFamilyMap().keySet()) {
                 rawScan.addFamily(family);
             }
+            scanner = ((BaseRegionScanner)innerScanner).getNewRegionScanner(rawScan);
             innerScanner.close();
-            RegionScanner scanner = region.getScanner(rawScan);
-            return getRegionScanner(scanner, region, scan, env, oldCoproc);
+        } else {
+            if (adjustScanFilter(scan)) {
+                scanner = ((BaseRegionScanner) innerScanner).getNewRegionScanner(scan);
+                innerScanner.close();
+            } else {
+                scanner = innerScanner;
+            }
         }
-        return getRegionScanner(innerScanner, region, scan, env, oldCoproc);
+        return getRegionScanner(scanner, region, scan, env, oldCoproc);
     }
 
     private RegionScanner collectStats(final RegionScanner innerScanner, StatisticsCollector stats,

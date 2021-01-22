@@ -135,7 +135,6 @@ import org.apache.hadoop.hbase.regionserver.HRegionServer;
 import org.apache.hadoop.hbase.regionserver.RSRpcServices;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.phoenix.SystemExitRule;
-import org.apache.phoenix.end2end.BaseHBaseManagedTimeIT;
 import org.apache.phoenix.exception.SQLExceptionCode;
 import org.apache.phoenix.exception.SQLExceptionInfo;
 import org.apache.phoenix.jdbc.PhoenixConnection;
@@ -171,13 +170,19 @@ import org.apache.phoenix.thirdparty.com.google.common.util.concurrent.ThreadFac
  * Base class that contains all the methods needed by
  * client-time and hbase-time managed tests.
  * 
- * For tests needing connectivity to a cluster, please use
- * {@link BaseHBaseManagedTimeIT}.
+ * Tests using a mini cluster need to be classified either
+ * as {@link ParallelStatsDisabledTest} or {@link ParallelStatsEnabledTest}
+ * or {@link NeedsOwnMiniClusterTest} otherwise they won't be run
+ * when one runs mvn verify or mvn install.
  * 
- * In the rare case when a test can't share the same mini cluster as the 
- * ones used by {@link BaseHBaseManagedTimeIT},
- * one could extend this class and spin up your own mini cluster. Please 
- * make sure to shutdown the mini cluster in a method annotated by @AfterClass.  
+ * For tests needing connectivity to a cluster, please use
+ * {@link ParallelStatsDisabledIt} or {@link ParallelStatsEnabledIt}.
+ * 
+ * In the case when a test can't share the same mini cluster as the
+ * ones used by {@link ParallelStatsDisabledIt} or {@link ParallelStatsEnabledIt},
+ * one could extend this class and spin up your own mini cluster. Please
+ * make sure to annotate such classes with {@link NeedsOwnMiniClusterTest} and
+ * shutdown the mini cluster in a method annotated by @AfterClass.
  *
  */
 
@@ -640,11 +645,8 @@ public abstract class BaseTest {
         // This results in processing one row at a time in each next operation of the aggregate region
         // scanner, i.e.,  one row pages. In other words, 0ms page allows only one row to be processed
         // within one page; 0ms page is equivalent to one-row page
-        if (conf.getLong(QueryServices.UNGROUPED_AGGREGATE_PAGE_SIZE_IN_MS, 0) == 0) {
-            conf.setLong(QueryServices.UNGROUPED_AGGREGATE_PAGE_SIZE_IN_MS, 0);
-        }
-        if (conf.getLong(QueryServices.GROUPED_AGGREGATE_PAGE_SIZE_IN_MS, 0) == 0) {
-            conf.setLong(QueryServices.GROUPED_AGGREGATE_PAGE_SIZE_IN_MS, 0);
+        if (conf.getLong(QueryServices.PHOENIX_SERVER_PAGE_SIZE_MS, 0) == 0) {
+            conf.setLong(QueryServices.PHOENIX_SERVER_PAGE_SIZE_MS, 0);
         }
         return conf;
     }

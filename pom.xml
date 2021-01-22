@@ -42,7 +42,7 @@
   <modules>
     <module>phoenix-hbase-compat-2.4.0</module>
     <module>phoenix-hbase-compat-2.3.0</module>
-    <module>phoenix-hbase-compat-2.2.1</module>
+    <module>phoenix-hbase-compat-2.2.5</module>
     <module>phoenix-hbase-compat-2.1.6</module>
     <module>phoenix-core</module>
     <module>phoenix-pherf</module>
@@ -75,17 +75,23 @@
   </scm>
 
   <properties>
-    <!-- The HBase compatibility module that that will be included in
-    the shaded JARs and the assembly -->
-    <hbase.profile>2.2</hbase.profile>
 
     <!-- Hadoop and Hbase-thirdparty version -->
     <!-- These are expected to be overridden to conform to cluster versions
     along with hbase.version (defined in profiles) -->
-    <hadoop.version>3.0.3</hadoop.version>
+    <hadoop.version>3.1.4</hadoop.version>
     <hbase.thirdparty.version>2.2.1</hbase.thirdparty.version>
 
     <phoenix.thirdparty.version>1.0.0</phoenix.thirdparty.version>
+    <hbase.suffix>hbase-${hbase.profile}</hbase.suffix>
+
+    <!-- This is used by the release script only -->
+    <hbase.profile.list>2.1 2.2 2.3 2.4</hbase.profile.list>
+    <!-- The default hbase versions to build with (override with hbase.version) -->
+    <hbase-2.1.runtime.version>2.1.10</hbase-2.1.runtime.version>
+    <hbase-2.2.runtime.version>2.2.6</hbase-2.2.runtime.version>
+    <hbase-2.3.runtime.version>2.3.3</hbase-2.3.runtime.version>
+    <hbase-2.4.runtime.version>2.4.0</hbase-2.4.runtime.version>
 
     <!-- General Properties -->
     <antlr-input.dir>src/main/antlr3</antlr-input.dir>
@@ -133,6 +139,7 @@
     <maven-eclipse-plugin.version>2.9</maven-eclipse-plugin.version>
     <maven-build-helper-plugin.version>1.9.1</maven-build-helper-plugin.version>
     <maven-enforcer-plugin.version>3.0.0-M3</maven-enforcer-plugin.version>
+    <restrict-imports.enforcer.version>1.1.0</restrict-imports.enforcer.version>
     <maven-shade-plugin.version>3.2.4</maven-shade-plugin.version>
     <maven-antlr-eclipse-plugin.version>${antlr.version}</maven-antlr-eclipse-plugin.version>
     <maven-project-info-reports-plugin.version>3.1.1</maven-project-info-reports-plugin.version>
@@ -310,9 +317,7 @@
               <id>ParallelStatsEnabledTest</id>
               <configuration>
                 <reuseForks>true</reuseForks>
-                <!--parallel>methods</parallel>
-                <threadCount>20</threadCount-->
-                <argLine>@{jacocoArgLine} -Xmx2000m -XX:MaxPermSize=256m -Djava.security.egd=file:/dev/./urandom "-Djava.library.path=${hadoop.library.path}${path.separator}${java.library.path}" -XX:NewRatio=4 -XX:SurvivorRatio=8 -XX:+UseCompressedOops -XX:+UseConcMarkSweepGC -XX:+DisableExplicitGC -XX:+UseCMSInitiatingOccupancyOnly -XX:+CMSClassUnloadingEnabled -XX:+CMSScavengeBeforeRemark -XX:CMSInitiatingOccupancyFraction=68 -XX:+HeapDumpOnOutOfMemoryError -XX:HeapDumpPath=./target/ -Dorg.apache.hadoop.hbase.shaded.io.netty.packagePrefix=org.apache.hadoop.hbase.shaded.</argLine>
+                <argLine>@{jacocoArgLine} -Xmx2000m -Djava.security.egd=file:/dev/./urandom "-Djava.library.path=${hadoop.library.path}${path.separator}${java.library.path}" -XX:+HeapDumpOnOutOfMemoryError -XX:HeapDumpPath=./target/ -XX:NewRatio=4 -XX:SurvivorRatio=8 -XX:+UseCompressedOops -XX:+UseConcMarkSweepGC -XX:+DisableExplicitGC -XX:+UseCMSInitiatingOccupancyOnly -XX:+CMSClassUnloadingEnabled -XX:+CMSScavengeBeforeRemark -XX:CMSInitiatingOccupancyFraction=68 </argLine>
                 <groups>org.apache.phoenix.end2end.ParallelStatsEnabledTest</groups>
               </configuration>
               <goals>
@@ -324,17 +329,7 @@
               <id>ParallelStatsDisabledTest</id>
               <configuration>
                 <reuseForks>true</reuseForks>
-                <!--parallel>methods</parallel>
-                <threadCount>20</threadCount-->
-                <!-- We're intermittantly hitting this assertion when running in parallel:
-                     Caused by: java.lang.AssertionError: we should never remove a different context
-	                 at org.apache.hadoop.hbase.regionserver.HRegion$RowLockContext.cleanUp(HRegion.java:5206)
-	                 at org.apache.hadoop.hbase.regionserver.HRegion$RowLockImpl.release(HRegion.java:5246)
-	                 at org.apache.phoenix.coprocessor.MetaDataEndpointImpl.doGetTable(MetaDataEndpointImpl.java:2898)
-	                 at org.apache.phoenix.coprocessor.MetaDataEndpointImpl.doGetTable(MetaDataEndpointImpl.java:2835)
-	                 at org.apache.phoenix.coprocessor.MetaDataEndpointImpl.getTable(MetaDataEndpointImpl.java:490) -->
-		<!--enableAssertions>false</enableAssertions-->
-                <argLine>@{jacocoArgLine} -Xmx3000m -XX:MaxPermSize=256m -Djava.security.egd=file:/dev/./urandom "-Djava.library.path=${hadoop.library.path}${path.separator}${java.library.path}" -XX:NewRatio=4 -XX:SurvivorRatio=8 -XX:+UseCompressedOops -XX:+UseConcMarkSweepGC -XX:+DisableExplicitGC -XX:+UseCMSInitiatingOccupancyOnly -XX:+CMSClassUnloadingEnabled -XX:+CMSScavengeBeforeRemark -XX:CMSInitiatingOccupancyFraction=68 -XX:+HeapDumpOnOutOfMemoryError -XX:HeapDumpPath=./target/ -Dorg.apache.hadoop.hbase.shaded.io.netty.packagePrefix=org.apache.hadoop.hbase.shaded.</argLine>
+                <argLine>@{jacocoArgLine} -Xmx3000m -Djava.security.egd=file:/dev/./urandom "-Djava.library.path=${hadoop.library.path}${path.separator}${java.library.path}" -XX:+HeapDumpOnOutOfMemoryError -XX:HeapDumpPath=./target/ -XX:NewRatio=4 -XX:SurvivorRatio=8 -XX:+UseCompressedOops -XX:+UseConcMarkSweepGC -XX:+DisableExplicitGC -XX:+UseCMSInitiatingOccupancyOnly -XX:+CMSClassUnloadingEnabled -XX:+CMSScavengeBeforeRemark -XX:CMSInitiatingOccupancyFraction=68 </argLine>
                 <groups>org.apache.phoenix.end2end.ParallelStatsDisabledTest</groups>
               </configuration>
               <goals>
@@ -343,35 +338,11 @@
               </goals>
             </execution>
             <execution>
-              <id>HBaseManagedTimeTests</id>
-              <configuration>
-                <reuseForks>true</reuseForks>
-                <argLine>@{jacocoArgLine} -enableassertions -Xmx2000m -XX:MaxPermSize=128m -Djava.security.egd=file:/dev/./urandom "-Djava.library.path=${hadoop.library.path}${path.separator}${java.library.path}" -XX:+HeapDumpOnOutOfMemoryError -XX:HeapDumpPath=./target/ -Dorg.apache.hadoop.hbase.shaded.io.netty.packagePrefix=org.apache.hadoop.hbase.shaded.</argLine>
-                <groups>org.apache.phoenix.end2end.HBaseManagedTimeTest</groups>
-              </configuration>
-              <goals>
-                <goal>integration-test</goal>
-                <goal>verify</goal>
-              </goals>
-            </execution>
-	    <execution>
               <id>NeedTheirOwnClusterTests</id>
               <configuration>
                  <reuseForks>false</reuseForks>
-                 <argLine>@{jacocoArgLine} -enableassertions -Xmx2000m -XX:MaxPermSize=256m -Djava.security.egd=file:/dev/./urandom "-Djava.library.path=${hadoop.library.path}${path.separator}${java.library.path}" -XX:+HeapDumpOnOutOfMemoryError -XX:HeapDumpPath=./target/ -Dorg.apache.hadoop.hbase.shaded.io.netty.packagePrefix=org.apache.hadoop.hbase.shaded.</argLine>
+                 <argLine>@{jacocoArgLine} -enableassertions -Xmx2000m -Djava.security.egd=file:/dev/./urandom "-Djava.library.path=${hadoop.library.path}${path.separator}${java.library.path}" -XX:+HeapDumpOnOutOfMemoryError -XX:HeapDumpPath=./target/</argLine>
                  <groups>org.apache.phoenix.end2end.NeedsOwnMiniClusterTest</groups>
-              </configuration>
-              <goals>
-                 <goal>integration-test</goal>
-                 <goal>verify</goal>
-              </goals>
-            </execution>
-<execution>
-              <id>SplitSystemCatalogTests</id>
-              <configuration>
-                 <reuseForks>false</reuseForks>
-                 <argLine>@{jacocoArgLine} -enableassertions -Xmx2000m -XX:MaxPermSize=256m -Djava.security.egd=file:/dev/./urandom "-Djava.library.path=${hadoop.library.path}${path.separator}${java.library.path}" -XX:+HeapDumpOnOutOfMemoryError -XX:HeapDumpPath=./target/</argLine>
-                 <groups>org.apache.phoenix.end2end.SplitSystemCatalogTests</groups>
               </configuration>
               <goals>
                  <goal>integration-test</goal>
@@ -452,6 +423,53 @@
           <groupId>org.xolstice.maven.plugins</groupId>
           <artifactId>protobuf-maven-plugin</artifactId>
           <version>${protobuf.plugin.version}</version>
+        </plugin>
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-enforcer-plugin</artifactId>
+          <version>${maven-enforcer-plugin.version}</version>
+          <dependencies>
+            <dependency>
+              <groupId>de.skuzzle.enforcer</groupId>
+              <artifactId>restrict-imports-enforcer-rule</artifactId>
+              <version>${restrict-imports.enforcer.version}</version>
+            </dependency>
+          </dependencies>
+          <executions>
+            <execution>
+              <id>banned-illegal-imports</id>
+              <phase>process-sources</phase>
+              <goals>
+                <goal>enforce</goal>
+              </goals>
+              <configuration>
+                <rules>
+                  <restrictImports implementation="de.skuzzle.enforcer.restrictimports.rule.RestrictImports">
+                    <includeTestCode>true</includeTestCode>
+                    <reason>Use SLF4j for logging</reason>
+                    <bannedImports>
+                      <bannedImport>org.apache.commons.logging.Log</bannedImport>
+                      <bannedImport>org.apache.commons.logging.LogFactory</bannedImport>
+                    </bannedImports>
+                  </restrictImports>
+                  <restrictImports implementation="de.skuzzle.enforcer.restrictimports.rule.RestrictImports">
+                    <includeTestCode>true</includeTestCode>
+                    <reason>Use shaded version in phoenix-thirdparty</reason>
+                    <bannedImports>
+                      <bannedImport>com.google.common.**</bannedImport>
+                    </bannedImports>
+                  </restrictImports>
+                  <restrictImports implementation="de.skuzzle.enforcer.restrictimports.rule.RestrictImports">
+                    <includeTestCode>true</includeTestCode>
+                    <reason>Use commons lang 3</reason>
+                    <bannedImports>
+                      <bannedImport>org.apache.commons.lang.**</bannedImport>
+                    </bannedImports>
+                  </restrictImports>
+                </rules>
+              </configuration>
+            </execution>
+          </executions>
         </plugin>
       </plugins>
     </pluginManagement>
@@ -588,12 +606,42 @@
       </dependency>
       <dependency>
         <groupId>org.apache.phoenix</groupId>
-        <artifactId>phoenix-client</artifactId>
+        <artifactId>phoenix-client-hbase-2.1</artifactId>
         <version>${project.version}</version>
       </dependency>
       <dependency>
         <groupId>org.apache.phoenix</groupId>
-        <artifactId>phoenix-server</artifactId>
+        <artifactId>phoenix-client-hbase-2.2</artifactId>
+        <version>${project.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>org.apache.phoenix</groupId>
+        <artifactId>phoenix-client-hbase-2.3</artifactId>
+        <version>${project.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>org.apache.phoenix</groupId>
+        <artifactId>phoenix-client-hbase-2.4</artifactId>
+        <version>${project.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>org.apache.phoenix</groupId>
+        <artifactId>phoenix-server-hbase-2.1</artifactId>
+        <version>${project.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>org.apache.phoenix</groupId>
+        <artifactId>phoenix-server-hbase-2.2</artifactId>
+        <version>${project.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>org.apache.phoenix</groupId>
+        <artifactId>phoenix-server-hbase-2.3</artifactId>
+        <version>${project.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>org.apache.phoenix</groupId>
+        <artifactId>phoenix-server-hbase-2.4</artifactId>
         <version>${project.version}</version>
       </dependency>
       <dependency>
@@ -623,7 +671,7 @@
       </dependency>
       <dependency>
         <groupId>org.apache.phoenix</groupId>
-        <artifactId>phoenix-hbase-compat-2.2.1</artifactId>
+        <artifactId>phoenix-hbase-compat-2.2.5</artifactId>
         <version>${project.version}</version>
       </dependency>
       <dependency>
@@ -1468,20 +1516,25 @@
     <!-- The dependencies should be defined only in phoenix-core
     ,but maven doesn't seem to support that -->
     <profile>
-      <!-- must be identical to phoenix-hbase-compat-2.1.6 profile -->
-      <id>phoenix-hbase-compat-2.1.6-default</id>
+      <!-- must be identical to phoenix-hbase-compat-2.4.0 profile -->
+      <!-- PHOENIX-5993 This won't work with the public HBase artifacts -->
+      <id>phoenix-hbase-compat-2.4.0-default</id>
       <activation>
         <property>
           <name>!hbase.profile</name>
         </property>
       </activation>
       <properties>
-        <hbase.profile>2.1</hbase.profile>
-        <hbase.compat.version>2.1.6</hbase.compat.version>
-        <hbase.version>2.1.10</hbase.version>
+        <hbase.profile>2.4</hbase.profile>
+        <hbase.compat.version>2.4.0</hbase.compat.version>
+        <hbase.version>${hbase-2.4.runtime.version}</hbase.version>
+        <hbase.thirdparty.version>3.4.1</hbase.thirdparty.version>
+        <zookeeper.version>3.5.7</zookeeper.version>
       </properties>
     </profile>
     <profile>
+      <!-- PHOENIX-5993 may work with the public HBase artifacts, as the test don't trip over
+      anything but it should be rebuilt like 2.2+ -->
       <id>phoenix-hbase-compat-2.1.6</id>
       <activation>
         <activeByDefault>true</activeByDefault>
@@ -1493,12 +1546,13 @@
       <properties>
         <hbase.profile>2.1</hbase.profile>
         <hbase.compat.version>2.1.6</hbase.compat.version>
-        <hbase.version>2.1.9</hbase.version>
+        <hbase.version>${hbase-2.1.runtime.version}</hbase.version>
+        <hadoop.version>3.0.3</hadoop.version>
       </properties>
     </profile>
     <profile>
       <!-- PHOENIX-5993 This won't work with the public HBase artifacts -->
-      <id>phoenix-hbase-compat-2.2.1</id>
+      <id>phoenix-hbase-compat-2.2.5</id>
       <activation>
         <property>
           <name>hbase.profile</name>
@@ -1507,10 +1561,9 @@
       </activation>
       <properties>
         <hbase.profile>2.2</hbase.profile>
-        <hbase.compat.version>2.2.1</hbase.compat.version>
-        <hbase.version>2.2.6</hbase.version>
-        <!-- PHOENIX-6010 3.1.3 doesn't work because of Guava rebase -->
-        <hadoop.version>3.1.2</hadoop.version>
+        <hbase.compat.version>2.2.5</hbase.compat.version>
+        <hbase.version>${hbase-2.2.runtime.version}</hbase.version>
+        <hadoop.version>3.1.3</hadoop.version>
       </properties>
     </profile>
     <profile>
@@ -1525,11 +1578,10 @@
       <properties>
         <hbase.profile>2.3</hbase.profile>
         <hbase.compat.version>2.3.0</hbase.compat.version>
-        <hbase.version>2.3.3</hbase.version>
-        <!-- PHOENIX-6010 3.1.3 doesn't work because of Guava rebase -->
-        <hadoop.version>3.1.2</hadoop.version>
+        <hbase.version>${hbase-2.3.runtime.version}</hbase.version>
         <hbase.thirdparty.version>3.3.0</hbase.thirdparty.version>
         <zookeeper.version>3.5.7</zookeeper.version>
+        <hadoop.version>3.1.3</hadoop.version>
       </properties>
     </profile>
     <profile>
@@ -1544,9 +1596,7 @@
       <properties>
         <hbase.profile>2.4</hbase.profile>
         <hbase.compat.version>2.4.0</hbase.compat.version>
-        <hbase.version>2.4.0</hbase.version>
-        <!-- PHOENIX-6010 3.1.3 doesn't work because of Guava rebase -->
-        <hadoop.version>3.1.2</hadoop.version>
+        <hbase.version>${hbase-2.4.runtime.version}</hbase.version>
         <hbase.thirdparty.version>3.4.1</hbase.thirdparty.version>
         <zookeeper.version>3.5.7</zookeeper.version>
       </properties>

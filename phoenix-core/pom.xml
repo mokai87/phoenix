@@ -64,9 +64,9 @@
                     ("${hbase.compat.version}".equals("2.1.6")
                       &amp;&amp; hbaseMinor == 1
                       &amp;&amp; hbasePatch &gt;=6)
-                    || ("${hbase.compat.version}".equals("2.2.1")
+                    || ("${hbase.compat.version}".equals("2.2.5")
                       &amp;&amp; hbaseMinor == 2
-                      &amp;&amp; hbasePatch &gt;=1)
+                      &amp;&amp; hbasePatch &gt;=5)
                     || ("${hbase.compat.version}".equals("2.3.0")
                       &amp;&amp; hbaseMinor == 3
                       &amp;&amp; hbasePatch &gt;=0)
@@ -600,6 +600,21 @@
       <property>
         <name>hbase.profile</name>
         <value>2.4</value>
+      </property>
+    </activation>
+    <dependencies>
+      <dependency>
+        <groupId>org.apache.zookeeper</groupId>
+        <artifactId>zookeeper-jute</artifactId>
+      </dependency>
+    </dependencies>
+  </profile>
+  <profile>
+    <id>phoenix-hbase-compat-2.4.0-default</id>
+    <!-- keep dependency plugin happy -->
+    <activation>
+      <property>
+        <name>!hbase.profile</name>
       </property>
     </activation>
     <dependencies>
