@@ -28,6 +28,7 @@ import java.util.regex.Pattern;
 
 import javax.annotation.Nonnull;
 
+import org.apache.hadoop.util.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -263,6 +264,27 @@ public class ReadOnlyProps implements Iterable<Entry<String, String>> {
       }
     }
 
+    /**
+     * Get the value of the <code>name</code> property as a <code>long</code> or
+     * human-readable format. If no such property exists, the provided default value
+     * is returned, or if the specified value is not a valid <code>long</code> or
+     * human-readable format, then an error is thrown. You can use the following
+     * suffix (case insensitive): k(kilo), m(mega), g(giga), t(tera), p(peta), e(exa)
+     *
+     * @param name property name.
+     * @param defaultValue default value.
+     * @return property value as a <code>long</code>,
+     *         or <code>defaultValue</code>.
+     * @throws NumberFormatException - when the value is invalid
+     */
+    public long getLongBytes(String name, long defaultValue) {
+        String valueString = get(name);
+        if (valueString == null) {
+            return defaultValue;
+        }
+        return StringUtils.TraditionalBinaryPrefix.string2long(valueString);
+    }
+
     /** 
      * Get the value of the <code>name</code> property as a <code>float</code>.  
      * If no such property is specified, or if the specified value is not a valid
@@ -285,9 +307,9 @@ public class ReadOnlyProps implements Iterable<Entry<String, String>> {
     }
 
     /**
-     * Get the properties as a <code>Map<String,String></code>
+     * Get the properties as a {@code Map<String,String>}
      * 
-     * @return Map<String,String> 
+     * @return {@code Map<String,String>}
      */
     public Map<String,String> asMap() {
         return props;

@@ -17,6 +17,7 @@
  */
 package org.apache.phoenix.end2end.index;
 
+import static org.apache.phoenix.end2end.index.IndexCoprocIT.INDEXER_CONFIG;
 import static org.apache.phoenix.jdbc.PhoenixDatabaseMetaData.COLUMN_FAMILY;
 import static org.apache.phoenix.jdbc.PhoenixDatabaseMetaData.COLUMN_NAME;
 import static org.apache.phoenix.jdbc.PhoenixDatabaseMetaData.SYSTEM_CATALOG_SCHEMA;
@@ -24,25 +25,48 @@ import static org.apache.phoenix.jdbc.PhoenixDatabaseMetaData.SYSTEM_CATALOG_TAB
 import static org.apache.phoenix.jdbc.PhoenixDatabaseMetaData.TABLE_NAME;
 import static org.apache.phoenix.jdbc.PhoenixDatabaseMetaData.TABLE_SCHEM;
 import static org.apache.phoenix.jdbc.PhoenixDatabaseMetaData.TENANT_ID;
+import static org.junit.Assert.assertNull;
 
+import java.io.IOException;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.BitSet;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
 import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.CellUtil;
+import org.apache.hadoop.hbase.CompareOperator;
+import org.apache.hadoop.hbase.GenericTestUtils;
+import org.apache.hadoop.hbase.TableName;
+import org.apache.hadoop.hbase.client.Admin;
 import org.apache.hadoop.hbase.client.Delete;
 import org.apache.hadoop.hbase.client.Mutation;
+import org.apache.hadoop.hbase.client.ResultScanner;
+import org.apache.hadoop.hbase.client.Scan;
+import org.apache.hadoop.hbase.client.Table;
+import org.apache.hadoop.hbase.client.TableDescriptor;
+import org.apache.hadoop.hbase.client.TableDescriptorBuilder;
+import org.apache.hadoop.hbase.filter.SingleColumnValueFilter;
 import org.apache.hadoop.hbase.io.ImmutableBytesWritable;
 import org.apache.hadoop.hbase.util.Bytes;
+import org.apache.phoenix.hbase.index.IndexRegionObserver;
+import org.apache.phoenix.hbase.index.Indexer;
+import org.apache.phoenix.hbase.index.covered.NonTxIndexBuilder;
 import org.apache.phoenix.hbase.index.util.KeyValueBuilder;
+import org.apache.phoenix.index.GlobalIndexChecker;
+import org.apache.phoenix.index.PhoenixIndexBuilder;
+import org.apache.phoenix.index.PhoenixIndexCodec;
+import org.apache.phoenix.jdbc.PhoenixConnection;
+import org.apache.phoenix.query.ConnectionQueryServices;
+import org.apache.phoenix.query.QueryServicesOptions;
 import org.apache.phoenix.schema.ColumnNotFoundException;
 import org.apache.phoenix.schema.PColumn;
 import org.apache.phoenix.schema.PColumnFamily;
+import org.apache.phoenix.schema.PName;
 import org.apache.phoenix.schema.PRow;
 import org.apache.phoenix.schema.PTable;
 import org.apache.phoenix.schema.RowKeySchema;
@@ -51,9 +75,11 @@ import org.apache.phoenix.schema.types.PDataType;
 import org.apache.phoenix.util.EncodedColumnsUtil;
 import org.apache.phoenix.util.IndexUtil;
 import org.apache.phoenix.util.MetaDataUtil;
+import org.apache.phoenix.util.PhoenixRuntime;
 import org.apache.phoenix.util.SchemaUtil;
 
 import org.apache.phoenix.thirdparty.com.google.common.collect.Lists;
+import org.junit.Assert;
 
 public class IndexTestUtil {
 
@@ -165,4 +191,123 @@ public class IndexTestUtil {
         return row.toRowMutations();
     }
 
+    public static void downgradeCoprocs(String physicalTableName,
+            String physicalIndexName, Admin admin) throws Exception {
+        TableDescriptor baseDescriptor = admin.getDescriptor(TableName.valueOf(physicalTableName));
+        TableDescriptorBuilder baseDescBuilder = TableDescriptorBuilder.newBuilder(baseDescriptor);
+
+        assertCoprocsContains(IndexRegionObserver.class, baseDescriptor);
+        removeCoproc(IndexRegionObserver.class, baseDescBuilder, admin);
+
+        if (physicalIndexName != null) {
+            TableDescriptor indexDescriptor =
+                    admin.getDescriptor(TableName.valueOf(physicalIndexName));
+            assertCoprocsContains(GlobalIndexChecker.class, indexDescriptor);
+
+            TableDescriptorBuilder indexDescBuilder =
+                    TableDescriptorBuilder.newBuilder(indexDescriptor);
+            removeCoproc(IndexRegionObserver.class, indexDescBuilder, admin);
+            removeCoproc(GlobalIndexChecker.class, indexDescBuilder, admin);
+        }
+
+        Map<String, String> props = new HashMap<>();
+        props.put(NonTxIndexBuilder.CODEC_CLASS_NAME_KEY, PhoenixIndexCodec.class.getName());
+        Indexer.enableIndexing(baseDescBuilder, PhoenixIndexBuilder.class,
+                props, QueryServicesOptions.DEFAULT_COPROCESSOR_PRIORITY);
+        admin.modifyTable(baseDescBuilder.build());
+        baseDescriptor = admin.getDescriptor(TableName.valueOf(physicalTableName));
+        TableDescriptor indexDescriptor = null;
+        if (physicalIndexName != null) {
+            indexDescriptor = admin.getDescriptor(TableName.valueOf(physicalIndexName));
+        }
+        assertUsingOldCoprocs(baseDescriptor, indexDescriptor);
+    }
+
+
+    public static void assertCoprocsContains(Class clazz, TableDescriptor descriptor) {
+        String expectedCoprocName = clazz.getName();
+        boolean foundCoproc = isCoprocPresent(descriptor, expectedCoprocName);
+        Assert.assertTrue("Could not find coproc " + expectedCoprocName +
+                " in descriptor " + descriptor,foundCoproc);
+    }
+
+
+    public static boolean isCoprocPresent(TableDescriptor descriptor, String expectedCoprocName) {
+        boolean foundCoproc = false;
+        for (String coprocName : descriptor.getCoprocessors()){
+            if (coprocName.equals(expectedCoprocName)){
+                foundCoproc = true;
+                break;
+            }
+        }
+        return foundCoproc;
+    }
+
+    public static void removeCoproc(Class clazz, TableDescriptorBuilder descBuilder, Admin admin)
+            throws Exception {
+        descBuilder.removeCoprocessor(clazz.getName());
+        admin.modifyTable(descBuilder.build());
+    }
+
+    public static void assertUsingOldCoprocs(TableDescriptor baseDescriptor,
+            TableDescriptor indexDescriptor) {
+        assertCoprocsContains(Indexer.class, baseDescriptor);
+        assertCoprocConfig(baseDescriptor, Indexer.class.getName(),
+                INDEXER_CONFIG);
+        assertCoprocsNotContains(IndexRegionObserver.class, baseDescriptor);
+        if (indexDescriptor != null) {
+            assertCoprocsNotContains(IndexRegionObserver.class, indexDescriptor);
+            assertCoprocsNotContains(GlobalIndexChecker.class, indexDescriptor);
+        }
+    }
+
+    public static void assertCoprocConfig(TableDescriptor indexDesc,
+            String className, String expectedConfigValue){
+        boolean foundConfig = false;
+        for (Map.Entry<Bytes, Bytes> entry :
+                indexDesc.getValues().entrySet()){
+            String propKey = Bytes.toString(entry.getKey().get());
+            String propValue = Bytes.toString(entry.getValue().get());
+            //Unfortunately, a good API to read coproc properties didn't show up until
+            //HBase 2.0. Doing this the painful String-matching way to be compatible with 1.x
+            if (propKey.contains("coprocessor")){
+                if (propValue.contains(className)){
+                    Assert.assertEquals(className + " is configured incorrectly",
+                            expectedConfigValue,
+                            propValue);
+                    foundConfig = true;
+                    break;
+                }
+            }
+        }
+        Assert.assertTrue("Couldn't find config for " + className, foundConfig);
+    }
+
+    public static void assertCoprocsNotContains(Class clazz, TableDescriptor descriptor) {
+        String expectedCoprocName = clazz.getName();
+        boolean foundCoproc = isCoprocPresent(descriptor, expectedCoprocName);
+        Assert.assertFalse("Could find coproc " + expectedCoprocName +
+                " in descriptor " + descriptor,foundCoproc);
+    }
+
+    public static void assertRowsForEmptyColValue(Connection conn, String tableName,
+            byte[] emptyValue) throws SQLException, IOException {
+        ConnectionQueryServices cqs = conn.unwrap(PhoenixConnection.class).getQueryServices();
+        PTable pTable = PhoenixRuntime.getTable(conn, tableName);
+        Table hTable = cqs.getTable(pTable.getPhysicalName().getBytes());
+
+        byte[] emptyKeyValueCF = SchemaUtil.getEmptyColumnFamily(pTable);
+        byte[] emptyKeyValueQualifier = EncodedColumnsUtil.getEmptyKeyValueInfo(pTable).getFirst();
+
+        Scan scan = new Scan();
+        scan.setFilter(new SingleColumnValueFilter(
+                emptyKeyValueCF,
+                emptyKeyValueQualifier,
+                CompareOperator.NOT_EQUAL,
+                new org.apache.hadoop.hbase.filter.BinaryComparator(emptyValue)));
+        try (ResultScanner scanner = hTable.getScanner(scan)) {
+            assertNull("There are rows with in the table where the empty value is not "
+                    + Bytes.toStringBinary(emptyValue), scanner.next());
+        }
+    }
 }

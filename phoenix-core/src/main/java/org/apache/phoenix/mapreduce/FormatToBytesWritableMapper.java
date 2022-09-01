@@ -51,6 +51,7 @@ import org.apache.phoenix.schema.PTable;
 import org.apache.phoenix.schema.PTable.ImmutableStorageScheme;
 import org.apache.phoenix.util.ColumnInfo;
 import org.apache.phoenix.util.EncodedColumnsUtil;
+import org.apache.phoenix.util.IndexUtil.IndexStatusUpdater;
 import org.apache.phoenix.util.PhoenixRuntime;
 import org.apache.phoenix.util.QueryUtil;
 import org.apache.phoenix.util.SchemaUtil;
@@ -105,6 +106,7 @@ public abstract class FormatToBytesWritableMapper<RECORD> extends Mapper<LongWri
     protected PhoenixConnection conn;
     protected UpsertExecutor<RECORD, ?> upsertExecutor;
     protected ImportPreUpsertKeyValueProcessor preUpdateProcessor;
+    protected IndexStatusUpdater[] indexStatusUpdaters;
     protected List<String> tableNames;
     protected List<String> logicalNames;
     protected MapperUpsertListener<RECORD> upsertListener;
@@ -176,18 +178,19 @@ public abstract class FormatToBytesWritableMapper<RECORD> extends Mapper<LongWri
             while (uncommittedDataIterator.hasNext()) {
                 Pair<byte[], List<Cell>> kvPair = uncommittedDataIterator.next();
                 List<Cell> keyValueList = kvPair.getSecond();
-                keyValueList = preUpdateProcessor.preUpsert(kvPair.getFirst(), keyValueList);
-                byte[] first = kvPair.getFirst();
+                byte[] tableName = kvPair.getFirst();
+                keyValueList = preUpdateProcessor.preUpsert(tableName, keyValueList);
                 // Create a list of KV for each table
                 for (int i = 0; i < tableNames.size(); i++) {
-                    if (Bytes.compareTo(Bytes.toBytes(tableNames.get(i)), first) == 0) {
+                    if (Bytes.compareTo(Bytes.toBytes(tableNames.get(i)), tableName) == 0) {
                         if (!map.containsKey(i)) {
                             map.put(i, new ArrayList<Cell>());
                         }
-                        List<Cell> list = map.get(i);
-                        for (Cell kv : keyValueList) {
-                            list.add(kv);
+                        List<Cell> cellsForTable = map.get(i);
+                        if (indexStatusUpdaters[i] != null) {
+                            indexStatusUpdaters[i].setVerified(keyValueList);
                         }
+                        cellsForTable.addAll(keyValueList);
                         break;
                     }
                 }
@@ -210,6 +213,7 @@ public abstract class FormatToBytesWritableMapper<RECORD> extends Mapper<LongWri
      */
     private void initColumnIndexes() throws SQLException {
         columnIndexes = new TreeMap<>(Bytes.BYTES_COMPARATOR);
+        indexStatusUpdaters = new IndexStatusUpdater[logicalNames.size()];
         int columnIndex = 0;
         for (int index = 0; index < logicalNames.size(); index++) {
             PTable table = PhoenixRuntime.getTable(conn, logicalNames.get(index));
@@ -246,6 +250,10 @@ public abstract class FormatToBytesWritableMapper<RECORD> extends Mapper<LongWri
             byte[] cfn = Bytes.add(emptyColumnFamily, QueryConstants.NAMESPACE_SEPARATOR_BYTES, emptyKeyValue);
             columnIndexes.put(cfn, new Integer(columnIndex));
             columnIndex++;
+            if (PTable.IndexType.GLOBAL == table.getIndexType()) {
+                indexStatusUpdaters[index] =
+                        new IndexStatusUpdater(emptyColumnFamily, emptyKeyValue);
+            }
         }
     }
 
@@ -411,8 +419,9 @@ public abstract class FormatToBytesWritableMapper<RECORD> extends Mapper<LongWri
             ImportPreUpsertKeyValueProcessor {
 
         @Override
-        public List<Cell> preUpsert(byte[] rowKey, List<Cell> keyValues) {
+        public List<Cell> preUpsert(byte[] tableName, List<Cell> keyValues) {
             return keyValues;
         }
     }
+
 }

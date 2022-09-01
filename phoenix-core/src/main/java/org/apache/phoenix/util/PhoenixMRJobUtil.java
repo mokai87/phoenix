@@ -26,6 +26,7 @@ import java.net.HttpURLConnection;
 import java.net.MalformedURLException;
 import java.net.ProtocolException;
 import java.net.URL;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ExecutorService;
@@ -91,13 +92,6 @@ public class PhoenixMRJobUtil {
     public static String getActiveResourceManagerAddress(Configuration config, String zkQuorum)
             throws IOException, InterruptedException, KeeperException,
             InvalidProtocolBufferException, ZooKeeperConnectionException {
-        // In case of yarn HA is NOT enabled
-        String resourceManager = PhoenixMRJobUtil.getRMWebAddress(config);
-
-        LOGGER.info("ResourceManagerAddress from config = " + resourceManager);
-        if(!resourceManager.equals(YarnConfiguration.DEFAULT_RM_WEBAPP_ADDRESS)){
-            return resourceManager;
-        }
         // In case of yarn HA is enabled
         ZKWatcher zkw = null;
         ZooKeeper zk = null;
@@ -129,6 +123,11 @@ public class PhoenixMRJobUtil {
         } finally {
             if (zkw != null) zkw.close();
             if (zk != null) zk.close();
+        }
+        // In case of yarn HA is NOT enabled
+        if (activeRMHost == null) {
+            activeRMHost = PhoenixMRJobUtil.getRMWebAddress(config);
+            LOGGER.info("ResourceManagerAddress from config = " + activeRMHost);
         }
 
         return activeRMHost;
@@ -181,7 +180,7 @@ public class PhoenixMRJobUtil {
         BufferedReader in = null;
         StringBuilder response = null;
         try {
-            in = new BufferedReader(new InputStreamReader(is));
+            in = new BufferedReader(new InputStreamReader(is, StandardCharsets.UTF_8));
             String inputLine;
             response = new StringBuilder();
             while ((inputLine = in.readLine()) != null) {

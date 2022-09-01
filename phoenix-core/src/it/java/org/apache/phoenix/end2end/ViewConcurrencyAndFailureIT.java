@@ -23,6 +23,7 @@ import static org.apache.phoenix.coprocessor.PhoenixMetaDataCoprocessorHost
 import static org.apache.phoenix.exception.SQLExceptionCode.CANNOT_MUTATE_TABLE;
 import static org.apache.phoenix.util.TestUtil.TEST_PROPERTIES;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
@@ -66,10 +67,10 @@ import org.apache.phoenix.util.PhoenixRuntime;
 import org.apache.phoenix.util.PropertiesUtil;
 import org.apache.phoenix.util.ReadOnlyProps;
 import org.apache.phoenix.util.SchemaUtil;
-import org.apache.phoenix.util.TestUtil;
 import org.junit.After;
 import org.junit.BeforeClass;
 import org.junit.Test;
+import org.junit.experimental.categories.Category;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
 import org.junit.runners.Parameterized.Parameters;
@@ -78,6 +79,7 @@ import org.junit.runners.Parameterized.Parameters;
  * Tests for views dealing with other ongoing concurrent operations and
  * failure scenarios
  */
+@Category(NeedsOwnMiniClusterTest.class)
 @RunWith(Parameterized.class)
 public class ViewConcurrencyAndFailureIT extends SplitSystemCatalogIT {
 
@@ -117,10 +119,10 @@ public class ViewConcurrencyAndFailureIT extends SplitSystemCatalogIT {
     @Parameters(name="ViewConcurrencyAndFailureIT_transactionProvider={0}, "
             + "columnEncoded={1}")
     public static synchronized Collection<Object[]> data() {
-        return TestUtil.filterTxParamData(Arrays.asList(new Object[][] {
-                { "TEPHRA", false }, { "TEPHRA", true },
-                { "OMID", false },
-                { null, false }, { null, true }}),0);
+        return Arrays.asList(new Object[][] {
+            // OMID does not support column encoding
+            { "OMID", false },
+            { null, false }, { null, true }});
     }
 
     @BeforeClass
@@ -143,11 +145,13 @@ public class ViewConcurrencyAndFailureIT extends SplitSystemCatalogIT {
     }
 
     @After
-    public void cleanup() {
+    public void cleanup() throws Exception {
+        boolean refCountLeaked = isAnyStoreRefCountLeaked();
         latch1 = null;
         latch2 = null;
         throwExceptionInChildLinkPreHook = false;
         slowDownAddingChildLink = false;
+        assertFalse("refCount leaked", refCountLeaked);
     }
 
     @Test

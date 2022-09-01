@@ -63,7 +63,7 @@ sqlfile = tryDecode(args.sqlfile)
 
 # HBase configuration folder path (where hbase-site.xml reside) for
 # HBase/Phoenix client side property override
-hbase_config_path = os.getenv('HBASE_CONF_DIR', phoenix_utils.current_dir)
+hbase_config_path = phoenix_utils.hbase_conf_dir
 
 if sqlfile and not os.path.isfile(sqlfile):
     parser.print_help()
@@ -107,11 +107,21 @@ colorSetting = tryDecode(args.color)
 if os.name == 'nt':
     colorSetting = "false"
 
+#See PHOENIX-6661
+if os.uname()[4].startswith('ppc'):
+    disable_jna = " -Dorg.jline.terminal.jna=false "
+else:
+    disable_jna = ""
+
 java_cmd = java + ' $PHOENIX_OPTS ' + \
-    ' -cp "' + hbase_config_path + os.pathsep + phoenix_utils.hbase_conf_dir + os.pathsep + phoenix_utils.phoenix_client_jar + \
-    os.pathsep + phoenix_utils.hadoop_common_jar + os.pathsep + phoenix_utils.hadoop_hdfs_jar + \
-    os.pathsep + phoenix_utils.hadoop_conf + os.pathsep + phoenix_utils.hadoop_classpath + '" -Dlog4j.configuration=file:' + \
-    os.path.join(phoenix_utils.current_dir, "log4j.properties") + \
+    ' -cp "' + phoenix_utils.hbase_conf_dir + os.pathsep + \
+    phoenix_utils.hadoop_conf + os.pathsep + \
+    phoenix_utils.sqlline_with_deps_jar + os.pathsep + \
+    phoenix_utils.slf4j_backend_jar + os.pathsep + \
+    phoenix_utils.logging_jar + os.pathsep + \
+    phoenix_utils.phoenix_client_embedded_jar + \
+    '" -Dlog4j2.configurationFile=file:' + os.path.join(phoenix_utils.current_dir, "log4j2.properties") + \
+    disable_jna + \
     " sqlline.SqlLine -d org.apache.phoenix.jdbc.PhoenixDriver" + \
     " -u jdbc:phoenix:" + phoenix_utils.shell_quote([zookeeper]) + \
     " -n none -p none --color=" + colorSetting + " --fastConnect=" + tryDecode(args.fastconnect) + \

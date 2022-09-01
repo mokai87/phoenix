@@ -248,6 +248,16 @@ public enum SQLExceptionCode {
     }),
     TABLES_NOT_IN_SYNC(1140, "42M05", "Tables not in sync for some properties."),
 
+    // High Availability Errors
+    HA_CLOSED_AFTER_FAILOVER(1984, "F1Q84", "Connection closed after failover happened.",
+        i -> new FailoverSQLException(i.getMessage(), i.getHaGroupInfo(), i.getRootCause())),
+    HA_NO_ACTIVE_CLUSTER(1985, "F1Q85", "No ACTIVE HBase cluster found.",
+        i -> new FailoverSQLException(i.getMessage(), i.getHaGroupInfo(), i.getRootCause())),
+    HA_READ_FROM_CLUSTER_FAILED_ON_NULL(1986, "F1Q86", "Unable to read from cluster for null."),
+    HA_INVALID_PROPERTIES(1987, "F1Q87", "Invalid properties to get a Phoenix HA connection."),
+    HA_CLUSTER_CAN_NOT_CONNECT(1988, "F1Q88", "Cluster can not serve any requests for this HA group"),
+
+
     // Syntax error
     TYPE_NOT_SUPPORTED_FOR_OPERATOR(1014, "42Y01", "The operator does not support the operand type."),
     AGGREGATE_IN_GROUP_BY(1016, "42Y26", "Aggregate expressions may not be used in GROUP BY."),
@@ -259,13 +269,14 @@ public enum SQLExceptionCode {
     INVALID_BUCKET_NUM(1021, "42Y80", "Salt bucket numbers should be with 1 and 256."),
     NO_SPLITS_ON_SALTED_TABLE(1022, "42Y81", "Should not specify split points on salted table with default row key order."),
     SALT_ONLY_ON_CREATE_TABLE(1024, "42Y82", "Salt bucket number may only be specified when creating a table."),
+    NO_NORMALIZER_ON_SALTED_TABLE(1147, "42Y86", "Should not enable normalizer on salted table."),
     SET_UNSUPPORTED_PROP_ON_ALTER_TABLE(1025, "42Y83", "Unsupported property set in ALTER TABLE command."),
     CANNOT_ADD_NOT_NULLABLE_COLUMN(1038, "42Y84", "Only nullable columns may be added for a pre-existing table."),
     NO_MUTABLE_INDEXES(1026, "42Y85", "Mutable secondary indexes are only supported for HBase version " + MetaDataUtil.decodeHBaseVersionAsString(MetaDataProtocol.MUTABLE_SI_VERSION_THRESHOLD) + " and above."),
     INVALID_INDEX_STATE_TRANSITION(1028, "42Y87", "Invalid index state transition."),
     INVALID_MUTABLE_INDEX_CONFIG(1029, "42Y88", "Mutable secondary indexes must have the "
             + IndexManagementUtil.WAL_EDIT_CODEC_CLASS_KEY + " property set to "
-            +  IndexManagementUtil.INDEX_WAL_EDIT_CODEC_CLASS_NAME + " in the hbase-sites.xml of every region server."),
+            + IndexManagementUtil.INDEX_WAL_EDIT_CODEC_CLASS_NAME + " in the hbase-sites.xml of every region server."),
     CANNOT_CREATE_DEFAULT(1031, "42Y90", "Cannot create column with a stateful default value."),
     CANNOT_CREATE_DEFAULT_ROWTIMESTAMP(1032, "42Y90", "Cannot create ROW_TIMESTAMP column with a default value."),
 
@@ -524,6 +535,9 @@ public enum SQLExceptionCode {
                     info.getMutationSizeBytes());
         }
     }),
+    NEW_INTERNAL_CONNECTION_THROTTLED(731, "410M1", "Could not create connection " +
+            "because the internal connections already has the maximum number" +
+            " of connections to the target cluster."),
     MAX_HBASE_CLIENT_KEYVALUE_MAXSIZE_EXCEEDED(732,
             "LIM03", "The Phoenix Column size is bigger than maximum " +
             "HBase client key value allowed size for ONE_CELL_PER_COLUMN table, " +
@@ -556,7 +570,20 @@ public enum SQLExceptionCode {
         "CASCADE INDEX feature is not supported for local index"),
 
     INVALID_REGION_SPLIT_POLICY(908, "43M19",
-        "REGION SPLIT POLICY is incorrect.");
+        "REGION SPLIT POLICY is incorrect."),
+    ERROR_WRITING_TO_SCHEMA_REGISTRY(909, "4320",
+            "Error writing DDL change to external schema registry"),
+
+    CANNOT_TRANSFORM_ALREADY_TRANSFORMING_TABLE(910, "43M21",
+                                        "Cannot transform an index or a table who is already going through a transform."),
+
+    CANNOT_TRANSFORM_LOCAL_OR_VIEW_INDEX(911, "43M22", "Cannot transform a view index or a local index. For view index, consider creating a new view index."),
+
+    CANNOT_TRANSFORM_TABLE_WITH_LOCAL_INDEX(912, "43M23", "Cannot transform a table with a local index."),
+
+    CANNOT_TRANSFORM_TABLE_WITH_APPEND_ONLY_SCHEMA(913, "43M24", "Cannot transform a table with append-only schema."),
+
+    CANNOT_TRANSFORM_TRANSACTIONAL_TABLE(914, "43M25", "Cannot transform a transactional table.");
 
     private final int errorCode;
     private final String sqlState;

@@ -93,6 +93,7 @@ import org.apache.phoenix.hbase.index.util.ImmutableBytesPtr;
 import org.apache.phoenix.hbase.index.util.VersionUtil;
 import org.apache.phoenix.join.HashCacheClient;
 import org.apache.phoenix.mapreduce.util.PhoenixConfigurationUtil;
+import org.apache.phoenix.monitoring.OverAllQueryMetrics;
 import org.apache.phoenix.parse.FilterableStatement;
 import org.apache.phoenix.parse.HintNode;
 import org.apache.phoenix.parse.HintNode.Hint;
@@ -280,7 +281,15 @@ public abstract class BaseResultIterators extends ExplainTable implements Result
             }
 
             if (perScanLimit != null) {
-                ScanUtil.andFilterAtEnd(scan, new PageFilter(perScanLimit));
+                if (scan.getAttribute(BaseScannerRegionObserver.INDEX_FILTER) == null) {
+                    ScanUtil.andFilterAtEnd(scan, new PageFilter(perScanLimit));
+                } else {
+                    // if we have an index filter and a limit, handle the limit after the filter
+                    // we cast the limit to a long even though it passed as an Integer so that
+                    // if we need extend this in the future the serialization is unchanged
+                    scan.setAttribute(BaseScannerRegionObserver.INDEX_LIMIT,
+                            Bytes.toBytes((long) perScanLimit));
+                }
             }
             
             if(offset!=null){
@@ -404,6 +413,7 @@ public abstract class BaseResultIterators extends ExplainTable implements Result
         ImmutableStorageScheme storageScheme = table.getImmutableStorageScheme();
         BitSet trackedColumnsBitset = isPossibleToUseEncodedCQFilter(encodingScheme, storageScheme) && !hasDynamicColumns(table) ? new BitSet(10) : null;
         boolean filteredColumnNotInProjection = false;
+
         for (Pair<byte[], byte[]> whereCol : context.getWhereConditionColumns()) {
             byte[] filteredFamily = whereCol.getFirst();
             if (!(familyMap.containsKey(filteredFamily))) {
@@ -443,22 +453,6 @@ public abstract class BaseResultIterators extends ExplainTable implements Result
                 preventSeekToColumn = referencedCfCount == 1 && hbaseServerVersion < MIN_SEEK_TO_COLUMN_VERSION;
             }
         }
-        for (Entry<byte[], NavigableSet<byte[]>> entry : familyMap.entrySet()) {
-            ImmutableBytesPtr cf = new ImmutableBytesPtr(entry.getKey());
-            NavigableSet<byte[]> qs = entry.getValue();
-            NavigableSet<ImmutableBytesPtr> cols = null;
-            if (qs != null) {
-                cols = new TreeSet<ImmutableBytesPtr>();
-                for (byte[] q : qs) {
-                    cols.add(new ImmutableBytesPtr(q));
-                    if (trackedColumnsBitset != null) {
-                        int qualifier = encodingScheme.decode(q);
-                        trackedColumnsBitset.set(qualifier);
-                    }
-                }
-            }
-            columnsTracker.put(cf, cols);
-        }
         // Making sure that where condition CFs are getting scanned at HRS.
         for (Pair<byte[], byte[]> whereCol : context.getWhereConditionColumns()) {
             byte[] family = whereCol.getFirst();
@@ -490,6 +484,26 @@ public abstract class BaseResultIterators extends ExplainTable implements Result
                     scan.addColumn(family, whereCol.getSecond());
                 }
             }
+        }
+        for (Entry<byte[], NavigableSet<byte[]>> entry : familyMap.entrySet()) {
+            ImmutableBytesPtr cf = new ImmutableBytesPtr(entry.getKey());
+            NavigableSet<byte[]> qs = entry.getValue();
+            NavigableSet<ImmutableBytesPtr> cols = null;
+            if (qs != null) {
+                cols = new TreeSet<ImmutableBytesPtr>();
+                for (byte[] q : qs) {
+                    cols.add(new ImmutableBytesPtr(q));
+                    if (trackedColumnsBitset != null) {
+                        int qualifier = encodingScheme.decode(q);
+                        trackedColumnsBitset.set(qualifier);
+                    }
+                }
+            } else {
+                // cannot use EncodedQualifiersColumnProjectionFilter in this case
+                // since there's an unknown set of qualifiers (cf.*)
+                trackedColumnsBitset = null;
+            }
+            columnsTracker.put(cf, cols);
         }
         if (!columnsTracker.isEmpty()) {
             if (preventSeekToColumn) {
@@ -1382,15 +1396,27 @@ public abstract class BaseResultIterators extends ExplainTable implements Result
             success = true;
             return iterators;
         } catch (TimeoutException e) {
-            context.getOverallQueryMetrics().queryTimedOut();
+            OverAllQueryMetrics overAllQueryMetrics = context.getOverallQueryMetrics();
+            overAllQueryMetrics.queryTimedOut();
+            if (context.getScanRanges().isPointLookup()) {
+                overAllQueryMetrics.queryPointLookupTimedOut();
+            } else {
+                overAllQueryMetrics.queryScanTimedOut();
+            }
             GLOBAL_QUERY_TIMEOUT_COUNTER.increment();
             // thrown when a thread times out waiting for the future.get() call to return
-            toThrow = new SQLExceptionInfo.Builder(OPERATION_TIMED_OUT)
-                    .setMessage(". Query couldn't be completed in the allotted time: "
-                            + queryTimeOut + " ms").setRootCause(e).build().buildException();
+            toThrow = new SQLExceptionInfo.Builder(OPERATION_TIMED_OUT).setMessage(
+                    ". Query couldn't be completed in the allotted time: " + queryTimeOut + " ms")
+                    .setRootCause(e).build().buildException();
         } catch (SQLException e) {
             if (e.getErrorCode() == OPERATION_TIMED_OUT.getErrorCode()) {
-                context.getOverallQueryMetrics().queryTimedOut();
+                OverAllQueryMetrics overAllQueryMetrics = context.getOverallQueryMetrics();
+                overAllQueryMetrics.queryTimedOut();
+                if (context.getScanRanges().isPointLookup()) {
+                    overAllQueryMetrics.queryPointLookupTimedOut();
+                } else {
+                    overAllQueryMetrics.queryScanTimedOut();
+                }
                 GLOBAL_QUERY_TIMEOUT_COUNTER.increment();
             }
             toThrow = e;
@@ -1422,7 +1448,13 @@ public abstract class BaseResultIterators extends ExplainTable implements Result
             } finally {
                 if (toThrow != null) {
                     GLOBAL_FAILED_QUERY_COUNTER.increment();
-                    context.getOverallQueryMetrics().queryFailed();
+                    OverAllQueryMetrics overAllQueryMetrics = context.getOverallQueryMetrics();
+                    overAllQueryMetrics.queryFailed();
+                    if (context.getScanRanges().isPointLookup()) {
+                        overAllQueryMetrics.queryPointLookupFailed();
+                    } else {
+                        overAllQueryMetrics.queryScanFailed();
+                    }
                     throw toThrow;
                 }
             }

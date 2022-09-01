@@ -26,6 +26,9 @@ import org.apache.phoenix.util.ByteUtil;
 import org.apache.phoenix.util.SizedUtil;
 
 import org.apache.phoenix.thirdparty.com.google.common.primitives.Longs;
+
+import edu.umd.cs.findbugs.annotations.SuppressWarnings;
+
 /**
  *  A class that holds the guidePosts of a region and also allows combining the 
  *  guidePosts of different regions when the GuidePostsInfo is formed for a table.
@@ -85,7 +88,7 @@ public class GuidePostsInfo {
      *            Maximum length of a guidePost collected
      * @param guidePostsCount
      *            Number of guidePosts
-     * @param gpTimestamps
+     * @param updateTimes
      *            Times at which guidePosts were updated/created
      */
     public GuidePostsInfo(List<Long> byteCounts, ImmutableBytesWritable guidePosts, List<Long> rowCounts, int maxLength,
@@ -136,6 +139,8 @@ public class GuidePostsInfo {
         return estimatedSize;
     }
 
+    @SuppressWarnings(value="EC_ARRAY_AND_NONARRAY",
+            justification="ImmutableBytesWritable DOES implement equals(byte])")
     public boolean isEmptyGuidePost() {
         return guidePosts.equals(EMPTY_GUIDEPOST_KEY) && guidePostsCount == 0
                 && byteCounts.length == 1 && gpTimestamps.length == 1;

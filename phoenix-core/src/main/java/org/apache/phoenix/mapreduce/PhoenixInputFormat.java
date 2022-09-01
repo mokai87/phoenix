@@ -87,7 +87,7 @@ public class PhoenixInputFormat<T extends DBWritable> extends InputFormat<NullWr
         return generateSplits(queryPlan, configuration);
     }
 
-    private List<InputSplit> generateSplits(final QueryPlan qplan, Configuration config) throws IOException {
+    protected List<InputSplit> generateSplits(final QueryPlan qplan, Configuration config) throws IOException {
         // We must call this in order to initialize the scans and splits from the query plan
         setupParallelScansFromQueryPlan(qplan);
         final List<KeyRange> splits = qplan.getSplits();
@@ -160,7 +160,6 @@ public class PhoenixInputFormat<T extends DBWritable> extends InputFormat<NullWr
      * @param context
      * @return
      * @throws IOException
-     * @throws SQLException
      */
     protected  QueryPlan getQueryPlan(final JobContext context, final Configuration configuration)
             throws IOException {
@@ -203,18 +202,24 @@ public class PhoenixInputFormat<T extends DBWritable> extends InputFormat<NullWr
 
               // since we can't set a scn on connections with txn set TX_SCN attribute so that the max time range is set by BaseScannerRegionObserver
               if (txnScnValue != null) {
-                scan.setAttribute(BaseScannerRegionObserver.TX_SCN, Bytes.toBytes(Long.valueOf(txnScnValue)));
+                scan.setAttribute(BaseScannerRegionObserver.TX_SCN, Bytes.toBytes(Long.parseLong(txnScnValue)));
               }
 
               // setting the snapshot configuration
               String snapshotName = configuration.get(PhoenixConfigurationUtil.SNAPSHOT_NAME_KEY);
+              String restoreDir = configuration.get(PhoenixConfigurationUtil.RESTORE_DIR_KEY);
+              boolean isSnapshotRestoreManagedExternally = PhoenixConfigurationUtil.isMRSnapshotManagedExternally(configuration);
               Configuration config = queryPlan.getContext().
                       getConnection().getQueryServices().getConfiguration();
               if (snapshotName != null) {
                 PhoenixConfigurationUtil.setSnapshotNameKey(config, snapshotName);
+                PhoenixConfigurationUtil.setRestoreDirKey(config, restoreDir);
+                PhoenixConfigurationUtil.setMRSnapshotManagedExternally(config, isSnapshotRestoreManagedExternally);
               } else {
                 // making sure we unset snapshot name as new job doesn't need it
                 config.unset(PhoenixConfigurationUtil.SNAPSHOT_NAME_KEY);
+                config.unset(PhoenixConfigurationUtil.RESTORE_DIR_KEY);
+                config.unset(PhoenixConfigurationUtil.MAPREDUCE_EXTERNAL_SNAPSHOT_RESTORE);
               }
 
               return queryPlan;

@@ -18,45 +18,28 @@
 package org.apache.phoenix.transaction;
 
 import java.io.IOException;
-import java.util.List;
-
 import org.apache.phoenix.coprocessor.MetaDataProtocol;
 
 public class TransactionFactory {
 
-    private static PhoenixTransactionProvider tephraTransactionProvider;
-
-    static{
-        try {
-            tephraTransactionProvider = (PhoenixTransactionProvider)
-                    Class.forName("org.apache.phoenix.transaction.TephraTransactionProvider")
-                    .newInstance();
-        } catch (Throwable e) {
-            tephraTransactionProvider = NotAvailableTransactionProvider.getInstance();
-        }
-    }
-
     public enum Provider {
-        TEPHRA((byte)1, tephraTransactionProvider,
-            tephraTransactionProvider instanceof TephraTransactionProvider),
-        OMID((byte)2, OmidTransactionProvider.getInstance(), true);
+        // The provider formerly known as TEPHRA, deliberately renamed to warn downstreams
+        // that Tephra support no longer exists, while preserving the ordinal for backwards
+        // compatible use in system schema.
+        NOTAVAILABLE((byte)1, NotAvailableTransactionProvider.getInstance()),
+        // The OMID provider.
+        OMID((byte)2, OmidTransactionProvider.getInstance());
 
         private final byte code;
         private final PhoenixTransactionProvider provider;
-        private final boolean runTests;
 
-        Provider(byte code, PhoenixTransactionProvider provider, boolean runTests) {
+        Provider(byte code, PhoenixTransactionProvider provider) {
             this.code = code;
             this.provider = provider;
-            this.runTests = runTests;
         }
 
         public static Provider[] available() {
-            if(TEPHRA.getTransactionProvider() instanceof TephraTransactionProvider) {
-                return values();
-            } else {
-                return new Provider[] {OMID};
-            }
+            return new Provider[] { OMID };
         }
 
         public byte getCode() {
@@ -77,10 +60,6 @@ public class TransactionFactory {
         public PhoenixTransactionProvider getTransactionProvider()  {
             return provider;
         }
-
-        public boolean runTests() {
-            return runTests;
-        }
     }
 
     public static PhoenixTransactionProvider getTransactionProvider(Provider provider) {
@@ -92,7 +71,7 @@ public class TransactionFactory {
             return null;
         }
         Provider provider = (clientVersion < MetaDataProtocol.MIN_SYSTEM_TABLE_TIMESTAMP_4_14_0) 
-                ? Provider.TEPHRA
+                ? Provider.NOTAVAILABLE
                 : Provider.fromCode(txState[txState.length-1]);
         return provider.getTransactionProvider();
     }

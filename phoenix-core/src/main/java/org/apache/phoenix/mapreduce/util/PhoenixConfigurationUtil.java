@@ -42,6 +42,7 @@ import org.apache.hadoop.util.ReflectionUtils;
 import org.apache.phoenix.jdbc.PhoenixConnection;
 import org.apache.phoenix.mapreduce.FormatToBytesWritableMapper;
 import org.apache.phoenix.mapreduce.ImportPreUpsertKeyValueProcessor;
+import org.apache.phoenix.mapreduce.index.IndexScrutinyTool;
 import org.apache.phoenix.mapreduce.index.IndexScrutinyTool.OutputFormat;
 import org.apache.phoenix.mapreduce.index.IndexScrutinyTool.SourceTable;
 import org.apache.phoenix.mapreduce.index.IndexTool;
@@ -96,7 +97,15 @@ public final class PhoenixConfigurationUtil {
     
     /** For local indexes which are stored in a single separate physical table*/
     public static final String PHYSICAL_TABLE_NAME = "phoenix.output.table.name" ;
-    
+
+    public static final String TRANSFORM_RETRY_COUNT_VALUE = "phoenix.transform.retry.count";
+
+    public static final int DEFAULT_TRANSFORM_RETRY_COUNT = 50;
+
+    public static final String TRANSFORM_MONITOR_ENABLED = "phoenix.transform.monitor.enabled";
+
+    public static final boolean DEFAULT_TRANSFORM_MONITOR_ENABLED = true;
+
     public static final long DEFAULT_UPSERT_BATCH_SIZE = 1000;
     
     public static final String INPUT_CLASS = "phoenix.input.class";
@@ -126,6 +135,8 @@ public final class PhoenixConfigurationUtil {
 
     public static final String INDEX_TOOL_INDEX_TABLE_NAME = "phoenix.mr.index_tool.index.table.name";
 
+    public static final String INDEX_TOOL_SOURCE_TABLE = "phoenix.mr.index_tool.source.table";
+
     public static final String SCRUTINY_SOURCE_TABLE = "phoenix.mr.scrutiny.source.table";
 
     public static final String SCRUTINY_BATCH_SIZE = "phoenix.mr.scrutiny.batch.size";
@@ -134,6 +145,11 @@ public final class PhoenixConfigurationUtil {
             "phoenix.mr.scrutiny.output.invalid.rows";
 
     public static final boolean DEFAULT_SCRUTINY_OUTPUT_INVALID_ROWS = false;
+
+    public static final String SHOULD_FIX_UNVERIFIED_TRANSFORM =
+            "phoenix.mr.fix.unverified.transform";
+
+    public static final boolean DEFAULT_SHOULD_FIX_UNVERIFIED_TRANSFORM = false;
 
     public static final String SCRUTINY_OUTPUT_FORMAT = "phoenix.mr.scrutiny.output.format";
 
@@ -190,6 +206,25 @@ public final class PhoenixConfigurationUtil {
 
     // provide an absolute path to inject your multi input mapper logic
     public static final String MAPREDUCE_MULTI_INPUT_MAPPER_TRACKER_CLAZZ = "phoenix.mapreduce.multi.mapper.tracker.path";
+
+    // provide control to whether or not handle mapreduce snapshot restore and cleanup operations which
+    // is used by scanners on phoenix side internally or handled by caller externally
+    public static final String MAPREDUCE_EXTERNAL_SNAPSHOT_RESTORE = "phoenix.mapreduce.external.snapshot.restore";
+
+    // by default MR snapshot restore is handled internally by phoenix
+    public static final boolean DEFAULT_MAPREDUCE_EXTERNAL_SNAPSHOT_RESTORE = false;
+
+    // Is the mapreduce used for table/index transform
+    public static final String IS_TRANSFORMING_VALUE = "phoenix.mr.istransforming";
+
+    // Is force transform cutover
+    public static final String FORCE_CUTOVER_VALUE = "phoenix.mr.force.cutover";
+
+    // Is the mapreduce used for table/index transform
+    public static final String TRANSFORMING_TABLE_TYPE = "phoenix.mr.transform.tabletype";
+
+    public static final String IS_PARTIAL_TRANSFORM = "phoenix.mr.transform.ispartial";
+
 
     /**
      * Determines type of Phoenix Map Reduce job.
@@ -453,7 +488,7 @@ public final class PhoenixConfigurationUtil {
     public static int getMultiViewQueryMoreSplitSize(final Configuration configuration) {
         final String batchSize = configuration.get(MAPREDUCE_MULTI_INPUT_QUERY_BATCH_SIZE);
         Preconditions.checkNotNull(batchSize);
-        return Integer.valueOf(batchSize);
+        return Integer.parseInt(batchSize);
     }
 
     public static List<ColumnInfo> getSelectColumnMetadataList(final Configuration configuration) throws SQLException {
@@ -483,7 +518,7 @@ public final class PhoenixConfigurationUtil {
     public static int getMultiViewSplitSize(final Configuration configuration) {
         final String splitSize = configuration.get(MAPREDUCE_MULTI_INPUT_MAPPER_SPLIT_SIZE);
         Preconditions.checkNotNull(splitSize);
-        return Integer.valueOf(splitSize);
+        return Integer.parseInt(splitSize);
     }
 
     private static List<String> getSelectColumnList(
@@ -501,14 +536,16 @@ public final class PhoenixConfigurationUtil {
         Preconditions.checkNotNull(configuration);
         String selectStmt = configuration.get(SELECT_STATEMENT);
         if(isNotEmpty(selectStmt)) {
+            LOGGER.info("Select Statement: " + selectStmt);
             return selectStmt;
         }
         final String tableName = getInputTableName(configuration);
         Preconditions.checkNotNull(tableName);
         final List<ColumnInfo> columnMetadataList = getSelectColumnMetadataList(configuration);
         final String conditions = configuration.get(INPUT_TABLE_CONDITIONS);
+        LOGGER.info("Building select statement from input conditions: " + conditions);
         selectStmt = QueryUtil.constructSelectStatement(tableName, columnMetadataList, conditions);
-        LOGGER.info("Select Statement: "+ selectStmt);
+        LOGGER.info("Select Statement: " + selectStmt);
         configuration.set(SELECT_STATEMENT, selectStmt);
         return selectStmt;
     }
@@ -594,6 +631,51 @@ public final class PhoenixConfigurationUtil {
         Preconditions.checkNotNull(configuration);
         String clientPortString = configuration.get(HConstants.ZOOKEEPER_CLIENT_PORT);
         return clientPortString==null ? null : Integer.parseInt(clientPortString);
+    }
+
+    public static void setIsTransforming(Configuration configuration, Boolean isTransforming) {
+        Preconditions.checkNotNull(configuration);
+        Preconditions.checkNotNull(isTransforming);
+        configuration.set(IS_TRANSFORMING_VALUE, Boolean.toString(isTransforming));
+    }
+
+    public static Boolean getIsTransforming(Configuration configuration) {
+        Preconditions.checkNotNull(configuration);
+        return Boolean.valueOf(configuration.get(IS_TRANSFORMING_VALUE, "false"));
+    }
+
+    public static void setForceCutover(Configuration configuration, Boolean forceCutover) {
+        Preconditions.checkNotNull(configuration);
+        Preconditions.checkNotNull(forceCutover);
+        configuration.set(FORCE_CUTOVER_VALUE, Boolean.toString(forceCutover));
+    }
+
+    public static Boolean getForceCutover(Configuration configuration) {
+        Preconditions.checkNotNull(configuration);
+        return Boolean.valueOf(configuration.get(FORCE_CUTOVER_VALUE, "false"));
+    }
+
+    public static void setTransformingTableType(Configuration configuration,
+                                                SourceTable sourceTable) {
+        Preconditions.checkNotNull(configuration);
+        Preconditions.checkNotNull(sourceTable);
+        configuration.set(TRANSFORMING_TABLE_TYPE, sourceTable.name());
+    }
+
+    public static SourceTable getTransformingTableType(Configuration configuration) {
+        Preconditions.checkNotNull(configuration);
+        return SourceTable.valueOf(configuration.get(TRANSFORMING_TABLE_TYPE));
+    }
+
+    public static void setIsPartialTransform(final Configuration configuration, Boolean partialTransform) throws SQLException {
+        Preconditions.checkNotNull(configuration);
+        Preconditions.checkNotNull(partialTransform);
+        configuration.set(IS_PARTIAL_TRANSFORM, String.valueOf(partialTransform));
+    }
+
+    public static boolean getIsPartialTransform(final Configuration configuration)  {
+        Preconditions.checkNotNull(configuration);
+        return configuration.getBoolean(IS_PARTIAL_TRANSFORM, false);
     }
 
     /**
@@ -718,6 +800,19 @@ public final class PhoenixConfigurationUtil {
         return configuration.get(INDEX_TOOL_INDEX_TABLE_NAME);
     }
 
+    public static void setIndexToolSourceTable(Configuration configuration,
+            IndexScrutinyTool.SourceTable sourceTable) {
+        Preconditions.checkNotNull(configuration);
+        Preconditions.checkNotNull(sourceTable);
+        configuration.set(INDEX_TOOL_SOURCE_TABLE, sourceTable.name());
+    }
+
+    public static IndexScrutinyTool.SourceTable getIndexToolSourceTable(Configuration configuration) {
+        Preconditions.checkNotNull(configuration);
+        return IndexScrutinyTool.SourceTable.valueOf(configuration.get(INDEX_TOOL_SOURCE_TABLE,
+            IndexScrutinyTool.SourceTable.DATA_TABLE_SOURCE.name()));
+    }
+
     public static void setScrutinySourceTable(Configuration configuration,
             SourceTable sourceTable) {
         Preconditions.checkNotNull(configuration);
@@ -811,6 +906,18 @@ public final class PhoenixConfigurationUtil {
         return IndexTool.IndexVerifyType.fromValue(value);
     }
 
+    public static boolean getShouldFixUnverifiedTransform(Configuration configuration) {
+        Preconditions.checkNotNull(configuration);
+        return configuration.getBoolean(SHOULD_FIX_UNVERIFIED_TRANSFORM,
+                DEFAULT_SHOULD_FIX_UNVERIFIED_TRANSFORM);
+    }
+
+    public static void setShouldFixUnverifiedTransform(Configuration configuration,
+                                                    boolean shouldFixUnverified) {
+        Preconditions.checkNotNull(configuration);
+        configuration.setBoolean(SHOULD_FIX_UNVERIFIED_TRANSFORM, shouldFixUnverified);
+    }
+
     public static IndexTool.IndexVerifyType getDisableLoggingVerifyType(Configuration configuration) {
         Preconditions.checkNotNull(configuration);
         String value = configuration.get(DISABLE_LOGGING_TYPE, IndexTool.IndexVerifyType.NONE.getValue());
@@ -864,6 +971,43 @@ public final class PhoenixConfigurationUtil {
     public static void setTenantId(Configuration configuration, String tenantId){
         Preconditions.checkNotNull(configuration);
         configuration.set(MAPREDUCE_TENANT_ID, tenantId);
+    }
+
+    public static void setMRSnapshotManagedExternally(Configuration configuration, Boolean isSnapshotRestoreManagedExternally) {
+        Preconditions.checkNotNull(configuration);
+        Preconditions.checkNotNull(isSnapshotRestoreManagedExternally);
+        configuration.setBoolean(MAPREDUCE_EXTERNAL_SNAPSHOT_RESTORE, isSnapshotRestoreManagedExternally);
+    }
+
+    public static boolean isMRSnapshotManagedExternally(final Configuration configuration) {
+        Preconditions.checkNotNull(configuration);
+        boolean isSnapshotRestoreManagedExternally =
+                configuration.getBoolean(MAPREDUCE_EXTERNAL_SNAPSHOT_RESTORE, DEFAULT_MAPREDUCE_EXTERNAL_SNAPSHOT_RESTORE);
+        return isSnapshotRestoreManagedExternally;
+    }
+
+    /**
+     * Get the value of the <code>name</code> property as a set of comma-delimited
+     * <code>long</code> values.
+     * If no such property exists, null is returned.
+     * Hadoop Configuration object has support for getting ints delimited by comma
+     * but doesn't support for long.
+     * @param name property name
+     * @return property value interpreted as an array of comma-delimited
+     *         <code>long</code> values
+     */
+    public static long[] getLongs(Configuration conf, String name) {
+        String[] strings = conf.getTrimmedStrings(name);
+        // Configuration#getTrimmedStrings will never return null.
+        // If key is not found, it will return empty array.
+        if (strings.length == 0) {
+            return null;
+        }
+        long[] longs = new long[strings.length];
+        for (int i = 0; i < strings.length; i++) {
+            longs[i] = Long.parseLong(strings[i]);
+        }
+        return longs;
     }
 
 }

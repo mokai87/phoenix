@@ -88,6 +88,7 @@ import org.apache.phoenix.jdbc.PhoenixConnection;
 import org.apache.phoenix.jdbc.PhoenixEmbeddedDriver;
 import org.apache.phoenix.parse.HintNode;
 import org.apache.phoenix.parse.HintNode.Hint;
+import org.apache.phoenix.parse.TableName;
 import org.apache.phoenix.parse.WildcardParseNode;
 import org.apache.phoenix.query.QueryConstants;
 import org.apache.phoenix.query.QueryServices;
@@ -99,6 +100,8 @@ import org.apache.phoenix.schema.PTableType;
 import org.apache.phoenix.schema.SortOrder;
 import org.apache.phoenix.schema.tuple.Tuple;
 import org.apache.phoenix.schema.types.PInteger;
+import org.apache.phoenix.schema.tool.SchemaExtractionProcessor;
+import org.apache.phoenix.schema.tool.SchemaProcessor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -217,7 +220,7 @@ public final class QueryUtil {
                                 new Function<String, String>() {
                                     @Nullable
                                     @Override
-                                    public String apply(@Nullable String columnName) {
+                                    public String apply(String columnName) {
                                         return getEscapedFullColumnName(columnName);
                                     }
                                 })),
@@ -417,7 +420,8 @@ public final class QueryUtil {
     private static Connection getConnection(Properties props, Configuration conf)
             throws SQLException {
         String url = getConnectionUrl(props, conf);
-        LOGGER.info("Creating connection with the jdbc url: " + url);
+        LOGGER.info(String.format("Creating connection with the jdbc url: %s, isServerSide = %s",
+                url, props.getProperty(IS_SERVER_CONNECTION)));
         props = PropertiesUtil.combineProperties(props, conf);
         return DriverManager.getConnection(url, props);
     }
@@ -545,8 +549,10 @@ public final class QueryUtil {
                 " where " + COLUMN_NAME + " is null");
         addTenantIdFilter(connection, buf, catalog, parameterValues);
         if (schemaPattern != null) {
-            buf.append(" and " + TABLE_SCHEM + " like ?");
-            parameterValues.add(schemaPattern);
+            buf.append(" and " + TABLE_SCHEM + (schemaPattern.length() == 0 ? " is null" : " like ?"));
+            if(schemaPattern.length() > 0) {
+                parameterValues.add(schemaPattern);
+            }
         }
         if (SchemaUtil.isNamespaceMappingEnabled(null, connection.getQueryServices().getProps())) {
             buf.append(" and " + TABLE_NAME + " = '" + MetaDataClient.EMPTY_TABLE + "'");
@@ -764,6 +770,32 @@ public final class QueryUtil {
         for(int i = 0; i < parameterValues.size(); i++) {
             stmt.setString(i+1, parameterValues.get(i));
         }
+        return stmt;
+    }
+
+    /**
+     * Util that generates a PreparedStatement against syscat to get the table listing in a given schema.
+     */
+    public static PreparedStatement getShowCreateTableStmt(PhoenixConnection connection, String catalog, TableName tn) throws SQLException {
+
+        String output;
+        SchemaProcessor processor = new SchemaExtractionProcessor(null,
+                connection.unwrap(PhoenixConnection.class).getQueryServices().getConfiguration(),
+                tn.getSchemaName() == null ? null : "\"" + tn.getSchemaName()+ "\"",
+                "\"" + tn.getTableName() + "\"");
+        try {
+            output = processor.process();
+        } catch (Exception e) {
+            LOGGER.error(e.getStackTrace().toString());
+            throw new SQLException(e.getMessage());
+        }
+
+        StringBuilder buf = new StringBuilder("select \n" +
+                " ? as \"CREATE STATEMENT\"");
+        PreparedStatement stmt = connection.prepareStatement(buf.toString());
+
+        stmt.setString(1, output);
+
         return stmt;
     }
 

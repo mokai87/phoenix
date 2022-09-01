@@ -18,13 +18,9 @@
 
 package org.apache.phoenix.pherf.workload;
 
-import java.math.BigDecimal;
-import java.sql.Array;
 import java.sql.Connection;
-import java.sql.Date;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
-import java.sql.Types;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.List;
@@ -44,7 +40,6 @@ import org.apache.phoenix.pherf.exception.PherfException;
 import org.apache.phoenix.pherf.result.DataLoadThreadTime;
 import org.apache.phoenix.pherf.result.DataLoadTimeSummary;
 import org.apache.phoenix.pherf.result.ResultUtil;
-import org.apache.phoenix.pherf.rules.DataValue;
 import org.apache.phoenix.pherf.rules.RulesApplier;
 import org.apache.phoenix.pherf.util.PhoenixUtil;
 import org.apache.phoenix.pherf.util.RowCalculator;
@@ -70,25 +65,22 @@ public class WriteWorkload implements Workload {
     private final int batchSize;
     private final GeneratePhoenixStats generateStatistics;
     private final boolean useBatchApi;
+    private final Properties properties;
 
     public WriteWorkload(XMLConfigParser parser) throws Exception {
-        this(PhoenixUtil.create(), parser, GeneratePhoenixStats.NO);
+        this(PhoenixUtil.create(),  parser, PherfConstants.create().
+                getProperties(PherfConstants.PHERF_PROPERTIES, true), GeneratePhoenixStats.NO);
     }
-    
-    public WriteWorkload(XMLConfigParser parser, GeneratePhoenixStats generateStatistics) throws Exception {
-        this(PhoenixUtil.create(), parser, generateStatistics);
-    }
-
-    public WriteWorkload(PhoenixUtil util, XMLConfigParser parser, GeneratePhoenixStats generateStatistics) throws Exception {
-        this(util, parser, null, generateStatistics);
+    public WriteWorkload(XMLConfigParser parser, Properties properties,
+                         GeneratePhoenixStats generateStatistics) throws Exception {
+        this(PhoenixUtil.create(), parser, properties, generateStatistics);
     }
 
-    public WriteWorkload(PhoenixUtil phoenixUtil, XMLConfigParser parser, Scenario scenario, GeneratePhoenixStats generateStatistics)
-            throws Exception {
-        this(phoenixUtil,
-                PherfConstants.create().getProperties(PherfConstants.PHERF_PROPERTIES, true),
-                parser, scenario, generateStatistics);
+    public WriteWorkload(PhoenixUtil util, XMLConfigParser parser, Properties properties,
+                         GeneratePhoenixStats generateStatistics) throws Exception {
+        this(util,  parser, properties, null, generateStatistics);
     }
+
 
     /**
      * Default the writers to use up all available cores for threads. If writeParams are used in
@@ -97,20 +89,22 @@ public class WriteWorkload implements Workload {
      * TODO extract notion of the scenario list and have 1 write workload per scenario
      *
      * @param phoenixUtil {@link org.apache.phoenix.pherf.util.PhoenixUtil} Query helper
-     * @param properties  {@link java.util.Properties} default properties to use
      * @param parser      {@link org.apache.phoenix.pherf.configuration.XMLConfigParser}
+     * @param properties  {@link java.util.Properties} default properties to use
      * @param scenario    {@link org.apache.phoenix.pherf.configuration.Scenario} If null is passed
      *                    it will run against all scenarios in the parsers list.
      * @throws Exception
      */
-    public WriteWorkload(PhoenixUtil phoenixUtil, Properties properties, XMLConfigParser parser,
-            Scenario scenario, GeneratePhoenixStats generateStatistics) throws Exception {
+    public WriteWorkload(PhoenixUtil phoenixUtil, XMLConfigParser parser,
+                         Properties properties, Scenario scenario,
+                         GeneratePhoenixStats generateStatistics) throws Exception {
         this.pUtil = phoenixUtil;
         this.parser = parser;
         this.rulesApplier = new RulesApplier(parser);
         this.resultUtil = new ResultUtil();
         this.generateStatistics = generateStatistics;
-        int size = Integer.parseInt(properties.getProperty("pherf.default.dataloader.threadpool"));
+        this.properties = properties;
+        int size = Integer.parseInt(this.properties.getProperty("pherf.default.dataloader.threadpool"));
         
         // Overwrite defaults properties with those given in the configuration. This indicates the
         // scenario is a R/W mixed workload.
@@ -142,7 +136,7 @@ public class WriteWorkload implements Workload {
         String
                 bSize =
                 (writeParams == null) || (writeParams.getBatchSize() == Long.MIN_VALUE) ?
-                        properties.getProperty("pherf.default.dataloader.batchsize") :
+                        this.properties.getProperty("pherf.default.dataloader.batchsize") :
                         String.valueOf(writeParams.getBatchSize());
         this.batchSize =
                 (bSize == null) ? PherfConstants.DEFAULT_BATCH_SIZE : Integer.parseInt(bSize);
@@ -262,7 +256,7 @@ public class WriteWorkload implements Workload {
                 Connection connection = null;
                 PreparedStatement stmt = null;
                 try {
-                    connection = pUtil.getConnection(scenario.getTenantId());
+                    connection = pUtil.getConnection(scenario.getTenantId(), properties);
                     long logStartTime = EnvironmentEdgeManager.currentTimeMillis();
                     long maxDuration = (WriteWorkload.this.writeParams == null) ? Long.MAX_VALUE :
                         WriteWorkload.this.writeParams.getExecutionDurationInMs();
@@ -274,11 +268,11 @@ public class WriteWorkload implements Workload {
                         logPerNRows = Integer.valueOf(customizedLogPerNRows);
                     }
                     last = start = EnvironmentEdgeManager.currentTimeMillis();
-                    String sql = buildSql(columns, tableName);
+                    String sql = pUtil.buildSql(columns, tableName);
                     stmt = connection.prepareStatement(sql);
                     for (long i = rowCount; (i > 0) && ((EnvironmentEdgeManager.currentTimeMillis() - logStartTime)
                             < maxDuration); i--) {
-                        stmt = buildStatement(scenario, columns, stmt, simpleDateFormat);
+                        stmt = pUtil.buildStatement(rulesApplier, scenario, columns, stmt, simpleDateFormat);
                         if (useBatchApi) {
                             stmt.addBatch();
                         } else {
@@ -360,133 +354,6 @@ public class WriteWorkload implements Workload {
             }
         });
         return future;
-    }
-
-    private PreparedStatement buildStatement(Scenario scenario, List<Column> columns,
-            PreparedStatement statement, SimpleDateFormat simpleDateFormat) throws Exception {
-        int count = 1;
-        for (Column column : columns) {
-
-            DataValue dataValue = getRulesApplier().getDataForRule(scenario, column);
-            switch (column.getType()) {
-            case VARCHAR:
-                if (dataValue.getValue().equals("")) {
-                    statement.setNull(count, Types.VARCHAR);
-                } else {
-                    statement.setString(count, dataValue.getValue());
-                }
-                break;
-            case CHAR:
-                if (dataValue.getValue().equals("")) {
-                    statement.setNull(count, Types.CHAR);
-                } else {
-                    statement.setString(count, dataValue.getValue());
-                }
-                break;
-            case DECIMAL:
-                if (dataValue.getValue().equals("")) {
-                    statement.setNull(count, Types.DECIMAL);
-                } else {
-                    statement.setBigDecimal(count, new BigDecimal(dataValue.getValue()));
-                }
-                break;
-            case INTEGER:
-                if (dataValue.getValue().equals("")) {
-                    statement.setNull(count, Types.INTEGER);
-                } else {
-                    statement.setInt(count, Integer.parseInt(dataValue.getValue()));
-                }
-                break;
-            case UNSIGNED_LONG:
-                if (dataValue.getValue().equals("")) {
-                    statement.setNull(count, Types.OTHER);
-                } else {
-                    statement.setLong(count, Long.parseLong(dataValue.getValue()));
-                }
-                break;
-            case BIGINT:
-                if (dataValue.getValue().equals("")) {
-                    statement.setNull(count, Types.BIGINT);
-                } else {
-                    statement.setLong(count, Long.parseLong(dataValue.getValue()));
-                }
-                break;
-            case TINYINT:
-                if (dataValue.getValue().equals("")) {
-                    statement.setNull(count, Types.TINYINT);
-                } else {
-                    statement.setLong(count, Integer.parseInt(dataValue.getValue()));
-                }
-                break;
-            case DATE:
-                if (dataValue.getValue().equals("")) {
-                    statement.setNull(count, Types.DATE);
-                } else {
-                    Date
-                            date =
-                            new java.sql.Date(simpleDateFormat.parse(dataValue.getValue()).getTime());
-                    statement.setDate(count, date);
-                }
-                break;
-            case VARCHAR_ARRAY:
-                if (dataValue.getValue().equals("")) {
-                    statement.setNull(count, Types.ARRAY);
-                } else {
-                    Array
-                            arr =
-                            statement.getConnection().createArrayOf("VARCHAR", dataValue.getValue().split(","));
-                    statement.setArray(count, arr);
-                }
-            	break;
-            case VARBINARY:
-                if (dataValue.getValue().equals("")) {
-                    statement.setNull(count, Types.VARBINARY);
-                } else {
-                    statement.setBytes(count, dataValue.getValue().getBytes());
-                }
-                break;
-            case TIMESTAMP:
-                if (dataValue.getValue().equals("")) {
-                    statement.setNull(count, Types.TIMESTAMP);
-                } else {
-                    java.sql.Timestamp
-                            ts =
-                            new java.sql.Timestamp(simpleDateFormat.parse(dataValue.getValue()).getTime());
-                    statement.setTimestamp(count, ts);
-                }
-                break;
-            default:
-                break;
-            }
-            count++;
-        }
-        return statement;
-    }
-
-    private String buildSql(final List<Column> columns, final String tableName) {
-        StringBuilder builder = new StringBuilder();
-        builder.append("upsert into ");
-        builder.append(tableName);
-        builder.append(" (");
-        int count = 1;
-        for (Column column : columns) {
-            builder.append(column.getName());
-            if (count < columns.size()) {
-                builder.append(",");
-            } else {
-                builder.append(")");
-            }
-            count++;
-        }
-        builder.append(" VALUES (");
-        for (int i = 0; i < columns.size(); i++) {
-            if (i < columns.size() - 1) {
-                builder.append("?,");
-            } else {
-                builder.append("?)");
-            }
-        }
-        return builder.toString();
     }
 
     public XMLConfigParser getParser() {

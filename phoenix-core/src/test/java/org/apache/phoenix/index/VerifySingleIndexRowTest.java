@@ -31,11 +31,9 @@ import org.apache.hadoop.hbase.client.Put;
 import org.apache.hadoop.hbase.client.Result;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.Pair;
-import org.apache.phoenix.compat.hbase.HbaseCompatCapabilities;
 import org.apache.phoenix.coprocessor.GlobalIndexRegionScanner;
 import org.apache.phoenix.coprocessor.IndexRebuildRegionScanner;
 import org.apache.phoenix.coprocessor.IndexToolVerificationResult;
-import org.apache.phoenix.hbase.index.IndexRegionObserver;
 import org.apache.phoenix.jdbc.PhoenixConnection;
 import org.apache.phoenix.mapreduce.index.IndexVerificationOutputRepository;
 import org.apache.phoenix.query.BaseConnectionlessQueryTest;
@@ -43,7 +41,6 @@ import org.apache.phoenix.query.QueryConstants;
 import org.apache.phoenix.schema.PTable;
 import org.apache.phoenix.schema.PTableKey;
 import org.apache.phoenix.util.*;
-import org.junit.Assume;
 import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
@@ -61,8 +58,8 @@ import java.sql.SQLException;
 import java.util.*;
 
 import static org.apache.phoenix.coprocessor.GlobalIndexRegionScanner.MUTATION_TS_DESC_COMPARATOR;
-import static org.apache.phoenix.hbase.index.IndexRegionObserver.UNVERIFIED_BYTES;
-import static org.apache.phoenix.hbase.index.IndexRegionObserver.VERIFIED_BYTES;
+import static org.apache.phoenix.query.QueryConstants.UNVERIFIED_BYTES;
+import static org.apache.phoenix.query.QueryConstants.VERIFIED_BYTES;
 import static org.apache.phoenix.query.QueryConstants.EMPTY_COLUMN_BYTES;
 import static org.junit.Assert.*;
 import static org.mockito.Matchers.any;
@@ -367,7 +364,7 @@ public class VerifySingleIndexRowTest extends BaseConnectionlessQueryTest {
     @Test
     public void testVerifySingleIndexRow_expiredIndexRowCount_nonZero() throws IOException {
         IndexToolVerificationResult.PhaseResult
-                expectedPR = new IndexToolVerificationResult.PhaseResult(0, 1, 0, 0, 0, 0,0,0);
+                expectedPR = new IndexToolVerificationResult.PhaseResult(0, 1, 0, 0, 0, 0, 0, 0, 0, 0);
         try {
             for (Map.Entry<byte[], List<Mutation>>
                     entry : indexKeyToMutationMap.entrySet()) {
@@ -471,7 +468,6 @@ public class VerifySingleIndexRowTest extends BaseConnectionlessQueryTest {
     // We will report such row as a valid row.
     @Test
     public void testVerifySingleIndexRow_compactionOnIndexTable_atLeastOneExpectedMutationWithinMaxLookBack() throws Exception {
-        Assume.assumeTrue(HbaseCompatCapabilities.isMaxLookbackTimeSupported());
         String dataRowKey = "k1";
         byte[] indexRowKey1Bytes = generateIndexRowKey(dataRowKey, "val1");
         ManualEnvironmentEdge injectEdge = new ManualEnvironmentEdge();
@@ -490,7 +486,7 @@ public class VerifySingleIndexRowTest extends BaseConnectionlessQueryTest {
                 QueryConstants.EMPTY_COLUMN_BYTES,
                 EnvironmentEdgeManager.currentTimeMillis(),
                 Cell.Type.Put,
-                IndexRegionObserver.VERIFIED_BYTES);
+                QueryConstants.VERIFIED_BYTES);
         put.add(cell);
         // This mutation is beyond maxLookBack, so add it to expectedMutations only.
         expectedMutations.add(put);
@@ -504,7 +500,7 @@ public class VerifySingleIndexRowTest extends BaseConnectionlessQueryTest {
                 QueryConstants.EMPTY_COLUMN_BYTES,
                 EnvironmentEdgeManager.currentTimeMillis(),
                 Cell.Type.Put,
-                IndexRegionObserver.VERIFIED_BYTES);
+                QueryConstants.VERIFIED_BYTES);
         put.add(cell);
         // This mutation is in both expectedMutations and actualMutations, as it is within the maxLookBack, so it will not get chance to be compacted away
         expectedMutations.add(put);
@@ -522,8 +518,8 @@ public class VerifySingleIndexRowTest extends BaseConnectionlessQueryTest {
         assertTrue(rebuildScanner.verifySingleIndexRow(indexRow.getRow(), actualMutations,
                 indexKeyToMutationMap.get(indexRow.getRow()), mostRecentIndexRowKeys, Collections.EMPTY_LIST, actualPR, false));
         // validIndexRowCount = 1
-        IndexToolVerificationResult.PhaseResult expectedPR = new IndexToolVerificationResult.PhaseResult(1, 0, 0, 0, 0, 0, 0, 0);
-        assertEquals(actualPR, expectedPR);
+        IndexToolVerificationResult.PhaseResult expectedPR = new IndexToolVerificationResult.PhaseResult(1, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+        assertTrue(actualPR.equals(expectedPR));
     }
 
     // Test the major compaction on index table only.
@@ -531,7 +527,6 @@ public class VerifySingleIndexRowTest extends BaseConnectionlessQueryTest {
     // We will report such row as an invalid beyond maxLookBack row.
     @Test
     public void testVerifySingleIndexRow_compactionOnIndexTable_noExpectedMutationWithinMaxLookBack() throws Exception {
-        Assume.assumeTrue(HbaseCompatCapabilities.isMaxLookbackTimeSupported());
         String dataRowKey = "k1";
         byte[] indexRowKey1Bytes = generateIndexRowKey(dataRowKey, "val1");
         List<Mutation> expectedMutations = new ArrayList<>();
@@ -579,8 +574,8 @@ public class VerifySingleIndexRowTest extends BaseConnectionlessQueryTest {
         // Report this validation as a failure
         assertFalse(rebuildScanner.verifySingleIndexRow(indexRow.getRow(), actualMutations, expectedMutations, mostRecentIndexRowKeys, new ArrayList<Mutation>(), actualPR, true));
         // beyondMaxLookBackInvalidIndexRowCount = 1
-        IndexToolVerificationResult.PhaseResult expectedPR = new IndexToolVerificationResult.PhaseResult(0, 0, 0, 0, 0, 1, 0, 0);
-        assertEquals(actualPR, expectedPR);
+        IndexToolVerificationResult.PhaseResult expectedPR = new IndexToolVerificationResult.PhaseResult(0, 0, 0, 0, 0, 1, 0, 0, 0, 0);
+        assertTrue(actualPR.equals(expectedPR));
     }
 
     private static byte[] generateIndexRowKey(String dataRowKey, String dataVal){
@@ -593,11 +588,11 @@ public class VerifySingleIndexRowTest extends BaseConnectionlessQueryTest {
     }
 
     private IndexToolVerificationResult.PhaseResult getValidPhaseResult() {
-        return new IndexToolVerificationResult.PhaseResult(1, 0, 0, 0, 0, 0, 0, 0);
+        return new IndexToolVerificationResult.PhaseResult(1, 0, 0, 0, 0, 0, 0, 0, 0, 0);
     }
 
     private IndexToolVerificationResult.PhaseResult getInvalidPhaseResult() {
-        return new IndexToolVerificationResult.PhaseResult(0, 0, 0, 1, 0, 0, 0, 0);
+        return new IndexToolVerificationResult.PhaseResult(0, 0, 0, 1, 0, 0, 0, 0, 0, 0);
     }
 
     private void initializeLocalMockitoSetup(Map.Entry<byte[], List<Mutation>> entry,

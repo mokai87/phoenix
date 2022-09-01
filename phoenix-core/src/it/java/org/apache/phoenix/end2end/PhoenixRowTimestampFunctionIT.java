@@ -33,6 +33,7 @@ import org.apache.phoenix.util.EncodedColumnsUtil;
 import org.apache.phoenix.util.EnvironmentEdgeManager;
 import org.junit.Assert;
 import org.junit.Test;
+import org.junit.experimental.categories.Category;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
 
@@ -50,6 +51,7 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
+@Category(ParallelStatsDisabledTest.class)
 @RunWith(Parameterized.class)
 public class PhoenixRowTimestampFunctionIT extends ParallelStatsDisabledIT {
     private final boolean encoded;
@@ -61,13 +63,19 @@ public class PhoenixRowTimestampFunctionIT extends ParallelStatsDisabledIT {
     public PhoenixRowTimestampFunctionIT(QualifierEncodingScheme encoding,
             ImmutableStorageScheme storage) {
         StringBuilder optionBuilder = new StringBuilder();
-        optionBuilder.append(" COLUMN_ENCODED_BYTES = " + encoding.ordinal());
-        optionBuilder.append(",IMMUTABLE_STORAGE_SCHEME = "+ storage.toString());
-        this.tableDDLOptions = optionBuilder.toString();
-        this.encoded = (encoding != QualifierEncodingScheme.NON_ENCODED_QUALIFIERS)
-                            ? true : false;
         this.optimized = storage == ImmutableStorageScheme.SINGLE_CELL_ARRAY_WITH_OFFSETS
                             ? true : false;
+        // We cannot have non encoded column names if the storage type is single cell
+        this.encoded = (encoding != QualifierEncodingScheme.NON_ENCODED_QUALIFIERS)
+                ? true : (this.optimized) ? true : false;
+
+        if (this.optimized && encoding == QualifierEncodingScheme.NON_ENCODED_QUALIFIERS) {
+            optionBuilder.append(" COLUMN_ENCODED_BYTES = " + QualifierEncodingScheme.ONE_BYTE_QUALIFIERS.ordinal());
+        } else {
+            optionBuilder.append(" COLUMN_ENCODED_BYTES = " + encoding.ordinal());
+        }
+        optionBuilder.append(", IMMUTABLE_STORAGE_SCHEME = "+ storage.toString());
+        this.tableDDLOptions = optionBuilder.toString();
     }
 
     @Parameterized.Parameters(name = "encoding={0},storage={1}")
@@ -151,7 +159,7 @@ public class PhoenixRowTimestampFunctionIT extends ParallelStatsDisabledIT {
 
     @Test
     public void testRowTimestampDefault() throws Exception {
-
+        if (encoded || optimized) return;
         String tableName =  generateUniqueName();
         try (Connection conn = DriverManager.getConnection(getUrl())) {
             String ddl = "CREATE TABLE IF NOT EXISTS " + tableName
@@ -493,4 +501,23 @@ public class PhoenixRowTimestampFunctionIT extends ParallelStatsDisabledIT {
             }
         }
     }
+
+    @Test
+    public void testPhoenixRowTimestampWithWildcard() throws Exception {
+        try (Connection conn = DriverManager.getConnection(getUrl())) {
+            String dataTableName = generateUniqueName();
+            conn.createStatement().execute("create table " + dataTableName +
+                    " (pk1 integer not null primary key, x.v1 float, y.v2 float, z.v3 float)" + this.tableDDLOptions);
+            conn.createStatement().execute("upsert into " + dataTableName + " values(rand() * 100000000, rand(), rand(), rand())");
+            conn.commit();
+            ResultSet rs = conn.createStatement().executeQuery("SELECT v1 from " + dataTableName);
+            assertTrue(rs.next());
+            float v1 = rs.getFloat(1);
+            rs = conn.createStatement().executeQuery("SELECT * from " + dataTableName + " order by phoenix_row_timestamp()");
+            assertTrue(rs.next());
+            System.out.println(v1);
+            assertTrue(v1 == rs.getFloat(2));
+        }
+    }
+
 }

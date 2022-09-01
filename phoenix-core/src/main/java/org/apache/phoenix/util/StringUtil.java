@@ -41,11 +41,19 @@ public class StringUtil {
     public final static char SINGLE_CHAR_LIKE = '_';
     public final static char MULTI_CHAR_WILDCARD = '*';
     public final static char MULTI_CHAR_LIKE = '%';
-    public final static String[] LIKE_ESCAPE_SEQS = new String[]{"\\"+SINGLE_CHAR_LIKE, "\\"+MULTI_CHAR_LIKE};
-    public final static String[] LIKE_UNESCAPED_SEQS = new String[]{""+SINGLE_CHAR_LIKE, ""+MULTI_CHAR_LIKE};
+    private final static String[] LIKE_ESCAPE_SEQS = new String[]{"\\"+SINGLE_CHAR_LIKE, "\\"+MULTI_CHAR_LIKE};
+    private final static String[] LIKE_UNESCAPED_SEQS = new String[]{""+SINGLE_CHAR_LIKE, ""+MULTI_CHAR_LIKE};
     
 
     private StringUtil() {
+    }
+
+    public static final String[] getLikeEscapeSeqs() {
+        return Arrays.copyOf(LIKE_ESCAPE_SEQS, LIKE_ESCAPE_SEQS.length);
+    }
+
+    public static final String[] getLikeUnescapedSeqs() {
+        return Arrays.copyOf(LIKE_UNESCAPED_SEQS, LIKE_UNESCAPED_SEQS.length);
     }
 
     /** Replace instances of character ch in String value with String replacement */
@@ -340,7 +348,7 @@ public class StringUtil {
      *            the values to be stored in all elements of the array
      * @param fillFromIdx
      *            the index of the first element (inclusive) to be used as fill values
-     * @param filToIdx
+     * @param fillToIdx
      *            the index of the last element (exclusive) to be used as fill value
      * @param invertFill
      *            if true inverts the bits in fill before filling the array

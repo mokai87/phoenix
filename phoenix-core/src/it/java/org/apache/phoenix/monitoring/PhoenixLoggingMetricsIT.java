@@ -18,11 +18,13 @@
 package org.apache.phoenix.monitoring;
 
 import org.apache.phoenix.thirdparty.com.google.common.collect.Maps;
+import org.apache.phoenix.end2end.NeedsOwnMiniClusterTest;
 import org.apache.phoenix.jdbc.LoggingPhoenixConnection;
 import org.apache.phoenix.jdbc.PhoenixMetricsLog;
 import org.apache.phoenix.jdbc.LoggingPhoenixResultSet;
 import org.junit.Before;
 import org.junit.Test;
+import org.junit.experimental.categories.Category;
 
 import java.sql.Connection;
 import java.sql.DriverManager;
@@ -31,8 +33,10 @@ import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.Map;
 
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
+@Category(NeedsOwnMiniClusterTest.class)
 public class PhoenixLoggingMetricsIT extends BasePhoenixMetricsIT {
 
     private static final int NUM_ROWS = 10;
@@ -74,28 +78,28 @@ public class PhoenixLoggingMetricsIT extends BasePhoenixMetricsIT {
         String tableName3 = generateUniqueName();
 
         String create = "CREATE TABLE " + tableName3 + " (K INTEGER PRIMARY KEY)";
-        assertTrue(executeAndGetResultSet(create) == null);
+        assertNull(executeAndGetResultSet(create));
 
         String upsert = "UPSERT INTO " + tableName3 + " VALUES (42)";
-        assertTrue(executeAndGetResultSet(upsert) == null);
+        assertNull(executeAndGetResultSet(upsert));
 
         String select = "SELECT * FROM " + tableName3;
         assertTrue(executeAndGetResultSet(select) instanceof LoggingPhoenixResultSet);
 
-        String createView = "CREATE VIEW TEST_VIEW (K INTEGER) AS SELECT * FROM " + tableName3;
-        assertTrue(executeAndGetResultSet(createView) == null);
+        String createView = "CREATE VIEW TEST_VIEW (K1 INTEGER) AS SELECT * FROM " + tableName3;
+        assertNull(executeAndGetResultSet(createView));
 
         String createIndex = "CREATE INDEX TEST_INDEX ON " + tableName3 + " (K)";
-        assertTrue(executeAndGetResultSet(createIndex) == null);
+        assertNull(executeAndGetResultSet(createIndex));
 
         String dropIndex = "DROP INDEX TEST_INDEX ON " + tableName3;
-        assertTrue(executeAndGetResultSet(dropIndex) == null);
+        assertNull(executeAndGetResultSet(dropIndex));
 
         String dropView = "DROP VIEW TEST_VIEW";
-        assertTrue(executeAndGetResultSet(dropView) == null);
+        assertNull(executeAndGetResultSet(dropView));
 
         String dropTable = "DROP TABLE " + tableName3;
-        assertTrue(executeAndGetResultSet(dropTable) == null);
+        assertNull(executeAndGetResultSet(dropTable));
     }
 
     @Test
@@ -113,7 +117,7 @@ public class PhoenixLoggingMetricsIT extends BasePhoenixMetricsIT {
         loggedConn.commit();
         assertTrue("Mutation write metrics for not found for " + tableName2,
                 mutationWriteMetricsMap.get(tableName2).size() > 0);
-        assertMutationMetrics(tableName2, NUM_ROWS, mutationWriteMetricsMap);
+        assertMutationMetrics(tableName2, NUM_ROWS, true, mutationWriteMetricsMap);
         assertTrue("Mutation read metrics for not found for " + tableName1,
                 mutationReadMetricsMap.get(tableName1).size() > 0);
         assertReadMetricsForMutatingSql(tableName1, 1, mutationReadMetricsMap);

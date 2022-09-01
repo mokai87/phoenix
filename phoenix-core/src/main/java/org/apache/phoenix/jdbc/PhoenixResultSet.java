@@ -45,9 +45,11 @@ import java.text.Format;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Calendar;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+import org.apache.phoenix.monitoring.TableMetricsManager;
 import org.apache.phoenix.thirdparty.com.google.common.primitives.Bytes;
 import com.google.protobuf.InvalidProtocolBufferException;
 import org.apache.commons.lang3.ArrayUtils;
@@ -97,6 +99,7 @@ import org.slf4j.LoggerFactory;
 
 import org.apache.phoenix.thirdparty.com.google.common.annotations.VisibleForTesting;
 import org.apache.phoenix.thirdparty.com.google.common.base.Throwables;
+import org.apache.phoenix.thirdparty.com.google.common.base.Strings;
 import org.apache.phoenix.util.SchemaUtil;
 
 /**
@@ -125,7 +128,7 @@ import org.apache.phoenix.util.SchemaUtil;
  *
  * @since 0.1
  */
-public class PhoenixResultSet implements ResultSet, SQLCloseable {
+public class PhoenixResultSet implements PhoenixMonitoredResultSet, SQLCloseable {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(PhoenixResultSet.class);
 
@@ -156,6 +159,7 @@ public class PhoenixResultSet implements ResultSet, SQLCloseable {
     private Long count = 0L;
 
     private Object exception;
+    private long queryTime;
 
     public PhoenixResultSet(ResultIterator resultIterator, RowProjector rowProjector,
             StatementContext ctx) throws SQLException {
@@ -213,6 +217,14 @@ public class PhoenixResultSet implements ResultSet, SQLCloseable {
             statement.getResultSets().remove(this);
             overAllQueryMetrics.endQuery();
             overAllQueryMetrics.stopResultSetWatch();
+            if (context.getCurrentTable() != null && context.getCurrentTable().getTable() != null
+                    && !Strings.isNullOrEmpty(
+                    context.getCurrentTable().getTable().getPhysicalName().getString())) {
+                boolean isPointLookup = context.getScanRanges().isPointLookup();
+                String tableName =
+                        context.getCurrentTable().getTable().getPhysicalName().toString();
+                updateTableLevelReadMetrics(tableName, isPointLookup);
+            }
             if (!queryLogger.isSynced()) {
                 if(this.exception==null){
                     queryLogger.log(QueryLogInfo.QUERY_STATUS_I,QueryStatus.COMPLETED.toString());
@@ -851,7 +863,7 @@ public class PhoenixResultSet implements ResultSet, SQLCloseable {
             if (rowProjectorWithDynamicCols != null) {
                 rowProjectorWithDynamicCols.reset();
             }
-        } catch (RuntimeException e) {
+        } catch (RuntimeException | SQLException e) {
             // FIXME: Expression.evaluate does not throw SQLException
             // so this will unwrap throws from that.
             queryLogger.log(QueryLogInfo.QUERY_STATUS_I, QueryStatus.FAILED.toString());
@@ -863,7 +875,13 @@ public class PhoenixResultSet implements ResultSet, SQLCloseable {
                 throw (SQLException) e.getCause();
             }
             throw e;
-        }finally{
+        } finally {
+            // If an exception occurs during rs.next(), or if we're on the last row, update metrics
+            if (this.exception != null || currentRow == null) {
+                overAllQueryMetrics.endQuery();
+                overAllQueryMetrics.stopResultSetWatch();
+            }
+
             if (this.exception!=null) {
                 queryLogger.log(QueryLogInfo.NO_OF_RESULTS_ITERATED_I, count);
                 if (queryLogger.isDebugEnabled()) {
@@ -881,6 +899,34 @@ public class PhoenixResultSet implements ResultSet, SQLCloseable {
             }
         }
         return currentRow != null;
+    }
+
+    private void updateTableLevelReadMetrics(String tableName, boolean isPointLookup) {
+        Map<String, Map<MetricType, Long>> readMetrics = getReadMetrics();
+        TableMetricsManager.pushMetricsFromConnInstanceMethod(readMetrics);
+        Map<String, Map<MetricType, Long>> metricsFromOverallQuery = new HashMap<>();
+        Map<MetricType, Long> overAllReadMetrics = getOverAllRequestReadMetrics();
+        metricsFromOverallQuery.put(tableName, overAllReadMetrics);
+        TableMetricsManager.pushMetricsFromConnInstanceMethod(metricsFromOverallQuery);
+        if (readMetrics.get(tableName) != null) {
+            Long scanBytes = readMetrics.get(tableName).get(MetricType.SCAN_BYTES);
+            if (scanBytes == null) {
+                scanBytes = 0L;
+            }
+            TableMetricsManager.updateHistogramMetricsForQueryScanBytes(
+                    scanBytes, tableName, isPointLookup);
+            Long timeSpentInRSNext = overAllReadMetrics.get(MetricType.RESULT_SET_TIME_MS);
+
+            if (timeSpentInRSNext == null) {
+                timeSpentInRSNext = 0l;
+            }
+            timeSpentInRSNext += queryTime;
+            TableMetricsManager.updateHistogramMetricsForQueryLatency(tableName, timeSpentInRSNext, isPointLookup);
+
+            TableMetricsManager.updateMetricsMethod(tableName, this.exception == null ?
+                    MetricType.SELECT_AGGREGATE_SUCCESS_SQL_COUNTER :
+                    MetricType.SELECT_AGGREGATE_FAILURE_SQL_COUNTER, 1);
+        }
     }
 
     @Override
@@ -1377,15 +1423,18 @@ public class PhoenixResultSet implements ResultSet, SQLCloseable {
     public ResultIterator getUnderlyingIterator() {
         return scanner;
     }
-    
+
+    @Override
     public Map<String, Map<MetricType, Long>> getReadMetrics() {
         return readMetricsQueue.aggregate();
     }
 
+    @Override
     public Map<MetricType, Long> getOverAllRequestReadMetrics() {
         return overAllQueryMetrics.publish();
     }
-    
+
+    @Override
     public void resetMetrics() {
         readMetricsQueue.clearMetrics();
         readMetricsQueue.getScanMetricsHolderList().clear();
@@ -1394,6 +1443,10 @@ public class PhoenixResultSet implements ResultSet, SQLCloseable {
     
     public StatementContext getContext() {
         return context;
+    }
+
+    public void setQueryTime(long queryTime) {
+        this.queryTime = queryTime;
     }
 
     /**

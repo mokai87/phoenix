@@ -38,6 +38,7 @@ import org.apache.phoenix.mapreduce.util.PhoenixConfigurationUtil;
 import org.apache.phoenix.schema.PIndexState;
 import org.apache.phoenix.schema.PTable;
 import org.apache.phoenix.schema.task.Task;
+import org.apache.phoenix.schema.transform.Transform;
 import org.apache.phoenix.util.SchemaUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -58,12 +59,12 @@ public class PhoenixIndexImportDirectReducer extends
     private String indexTableName;
     private byte[] indexTableNameBytes;
 
-    private void updateCounters(IndexTool.IndexVerifyType verifyType,
+    protected void updateCounters(IndexTool.IndexVerifyType verifyType,
                                 Reducer<ImmutableBytesWritable, IntWritable, NullWritable, NullWritable>.Context context)
             throws IOException {
         Configuration configuration = context.getConfiguration();
         try (final Connection connection = ConnectionUtil.getInputConnection(configuration)) {
-            long ts = Long.valueOf(configuration.get(PhoenixConfigurationUtil.CURRENT_SCN_VALUE));
+            long ts = Long.parseLong(configuration.get(PhoenixConfigurationUtil.CURRENT_SCN_VALUE));
             IndexToolVerificationResult verificationResult =
                     resultRepository.getVerificationResult(connection, ts, indexTableNameBytes);
             context.getCounter(PhoenixIndexToolJobCounters.SCANNED_DATA_ROW_COUNT).
@@ -80,12 +81,12 @@ public class PhoenixIndexImportDirectReducer extends
                         setValue(verificationResult.getBeforeRebuildMissingIndexRowCount());
                 context.getCounter(PhoenixIndexToolJobCounters.BEFORE_REBUILD_INVALID_INDEX_ROW_COUNT).
                         setValue(verificationResult.getBeforeRebuildInvalidIndexRowCount());
+                context.getCounter(PhoenixIndexToolJobCounters.BEFORE_REBUILD_BEYOND_MAXLOOKBACK_MISSING_INDEX_ROW_COUNT).
+                        setValue(verificationResult.getBeforeRebuildBeyondMaxLookBackMissingIndexRowCount());
+                context.getCounter(PhoenixIndexToolJobCounters.BEFORE_REBUILD_BEYOND_MAXLOOKBACK_INVALID_INDEX_ROW_COUNT).
+                        setValue(verificationResult.getBeforeRebuildBeyondMaxLookBackInvalidIndexRowCount());
                 context.getCounter(PhoenixIndexToolJobCounters.BEFORE_REBUILD_INVALID_INDEX_ROW_COUNT_COZ_EXTRA_CELLS).
                         setValue(verificationResult.getBeforeIndexHasExtraCellsCount());
-                context.getCounter(PhoenixIndexToolJobCounters.BEFORE_REBUILD_BEYOND_MAXLOOKBACK_MISSING_INDEX_ROW_COUNT).
-                    setValue(verificationResult.getBeforeRebuildBeyondMaxLookBackMissingIndexRowCount());
-                context.getCounter(PhoenixIndexToolJobCounters.BEFORE_REBUILD_BEYOND_MAXLOOKBACK_INVALID_INDEX_ROW_COUNT).
-                    setValue(verificationResult.getBeforeRebuildBeyondMaxLookBackInvalidIndexRowCount());
                 context.getCounter(PhoenixIndexToolJobCounters.BEFORE_REBUILD_INVALID_INDEX_ROW_COUNT_COZ_MISSING_CELLS).
                         setValue(verificationResult.getBeforeIndexHasMissingCellsCount());
                 context.getCounter(PhoenixIndexToolJobCounters.BEFORE_REBUILD_UNVERIFIED_INDEX_ROW_COUNT).
@@ -94,6 +95,10 @@ public class PhoenixIndexImportDirectReducer extends
                         setValue(verificationResult.getBeforeRebuildOldIndexRowCount());
                 context.getCounter(PhoenixIndexToolJobCounters.BEFORE_REBUILD_UNKNOWN_INDEX_ROW_COUNT).
                         setValue(verificationResult.getBeforeRebuildUnknownIndexRowCount());
+                context.getCounter(PhoenixIndexToolJobCounters.BEFORE_REPAIR_EXTRA_VERIFIED_INDEX_ROW_COUNT).
+                        setValue(verificationResult.getBeforeRepairExtraVerifiedIndexRowCount());
+                context.getCounter(PhoenixIndexToolJobCounters.BEFORE_REPAIR_EXTRA_UNVERIFIED_INDEX_ROW_COUNT).
+                        setValue(verificationResult.getBeforeRepairExtraUnverifiedIndexRowCount());
             }
             if (verifyType == IndexTool.IndexVerifyType.BOTH || verifyType == IndexTool.IndexVerifyType.AFTER) {
                 context.getCounter(PhoenixIndexToolJobCounters.AFTER_REBUILD_VALID_INDEX_ROW_COUNT).
@@ -104,14 +109,18 @@ public class PhoenixIndexImportDirectReducer extends
                         setValue(verificationResult.getAfterRebuildMissingIndexRowCount());
                 context.getCounter(PhoenixIndexToolJobCounters.AFTER_REBUILD_INVALID_INDEX_ROW_COUNT).
                         setValue(verificationResult.getAfterRebuildInvalidIndexRowCount());
-                context.getCounter(PhoenixIndexToolJobCounters.AFTER_REBUILD_INVALID_INDEX_ROW_COUNT_COZ_EXTRA_CELLS).
-                        setValue(verificationResult.getAfterIndexHasExtraCellsCount());
-                context.getCounter(PhoenixIndexToolJobCounters.AFTER_REBUILD_INVALID_INDEX_ROW_COUNT_COZ_MISSING_CELLS).
-                        setValue(verificationResult.getAfterIndexHasMissingCellsCount());
                 context.getCounter(PhoenixIndexToolJobCounters.AFTER_REBUILD_BEYOND_MAXLOOKBACK_MISSING_INDEX_ROW_COUNT).
                         setValue(verificationResult.getAfterRebuildBeyondMaxLookBackMissingIndexRowCount());
                 context.getCounter(PhoenixIndexToolJobCounters.AFTER_REBUILD_BEYOND_MAXLOOKBACK_INVALID_INDEX_ROW_COUNT).
                         setValue(verificationResult.getAfterRebuildBeyondMaxLookBackInvalidIndexRowCount());
+                context.getCounter(PhoenixIndexToolJobCounters.AFTER_REBUILD_INVALID_INDEX_ROW_COUNT_COZ_EXTRA_CELLS).
+                        setValue(verificationResult.getAfterIndexHasExtraCellsCount());
+                context.getCounter(PhoenixIndexToolJobCounters.AFTER_REBUILD_INVALID_INDEX_ROW_COUNT_COZ_MISSING_CELLS).
+                        setValue(verificationResult.getAfterIndexHasMissingCellsCount());
+                context.getCounter(PhoenixIndexToolJobCounters.AFTER_REPAIR_EXTRA_VERIFIED_INDEX_ROW_COUNT).
+                    setValue(verificationResult.getAfterRepairExtraVerifiedIndexRowCount());
+                context.getCounter(PhoenixIndexToolJobCounters.AFTER_REPAIR_EXTRA_UNVERIFIED_INDEX_ROW_COUNT).
+                    setValue(verificationResult.getAfterRepairExtraUnverifiedIndexRowCount());
             }
             if (verificationResult.isVerificationFailed()) {
                 throw new IOException("Index verification failed! " + verificationResult);
@@ -149,6 +158,22 @@ public class PhoenixIndexImportDirectReducer extends
             } catch (SQLException e) {
                 LOGGER.error(" Failed to update the status to Active", e);
                 throw new RuntimeException(e.getMessage());
+            }
+        }
+
+        if (verifyType != IndexTool.IndexVerifyType.ONLY) {
+            if (PhoenixConfigurationUtil.getIsTransforming(context.getConfiguration())) {
+                try {
+                    Transform.completeTransform(ConnectionUtil
+                            .getInputConnection(context.getConfiguration()), context.getConfiguration());
+                    if (PhoenixConfigurationUtil.getForceCutover(context.getConfiguration())) {
+                        Transform.doForceCutover(ConnectionUtil
+                                .getInputConnection(context.getConfiguration()), context.getConfiguration());
+                    }
+                } catch (Exception e) {
+                    LOGGER.error(" Failed to complete transform", e);
+                    throw new RuntimeException(e.getMessage());
+                }
             }
         }
     }

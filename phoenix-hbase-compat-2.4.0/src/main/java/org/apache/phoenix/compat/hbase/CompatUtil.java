@@ -22,7 +22,10 @@ import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.CellComparator;
 import org.apache.hadoop.hbase.CellComparatorImpl;
 import org.apache.hadoop.hbase.MetaTableAccessor;
+import org.apache.hadoop.hbase.RegionMetrics;
+import org.apache.hadoop.hbase.ServerName;
 import org.apache.hadoop.hbase.TableName;
+import org.apache.hadoop.hbase.client.Admin;
 import org.apache.hadoop.hbase.client.Connection;
 import org.apache.hadoop.hbase.client.Scan;
 import org.apache.hadoop.hbase.exceptions.DeserializationException;
@@ -34,22 +37,21 @@ import org.apache.hadoop.hbase.regionserver.HStore;
 import org.apache.hadoop.hbase.regionserver.StoreFileWriter;
 import org.apache.hadoop.hbase.security.access.Permission;
 import org.apache.hadoop.hbase.security.access.PermissionStorage;
+import org.apache.hadoop.hbase.util.ChecksumType;
 import org.apache.hbase.thirdparty.com.google.common.collect.ListMultimap;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.io.IOException;
 
 
 public class CompatUtil {
 
+    private static final Logger LOGGER = LoggerFactory.getLogger(
+        CompatUtil.class);
+
     private CompatUtil() {
         //Not to be instantiated
-    }
-
-    public static int getCellSerializedSize(Cell cell) {
-        return cell.getSerializedSize();
-    }
-
-    public static ListMultimap<String, ? extends Permission> readPermissions(
-            byte[] data, Configuration conf) throws DeserializationException {
-        return PermissionStorage.readPermissions(data, conf);
     }
 
     public static HFileContext createHFileContext(Configuration conf, Algorithm compression,
@@ -64,17 +66,16 @@ public class CompatUtil {
             .build();
     }
 
-    public static HFileContextBuilder withComparator(HFileContextBuilder contextBuilder,
-            CellComparatorImpl cellComparator) {
-        return contextBuilder.withCellComparator(cellComparator);
-    }
-
-    public static StoreFileWriter.Builder withComparator(StoreFileWriter.Builder builder,
-            CellComparatorImpl cellComparator) {
-        return builder;
-    }
-
     public static Scan getScanForTableName(Connection conn, TableName tableName) {
         return MetaTableAccessor.getScanForTableName(conn.getConfiguration(), tableName);
     }
+
+    public static ChecksumType getChecksumType(Configuration conf) {
+        return HStore.getChecksumType(conf);
+    }
+
+    public static int getBytesPerChecksum(Configuration conf) {
+        return HStore.getBytesPerChecksum(conf);
+    }
+
 }

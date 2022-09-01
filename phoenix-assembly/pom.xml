@@ -22,7 +22,7 @@
   <parent>
     <groupId>org.apache.phoenix</groupId>
     <artifactId>phoenix</artifactId>
-    <version>5.1.0-SNAPSHOT</version>
+    <version>5.2.0-SNAPSHOT</version>
   </parent>
   <artifactId>phoenix-assembly</artifactId>
   <name>Phoenix Assembly</name>
@@ -30,7 +30,6 @@
   <packaging>pom</packaging>
 
   <properties>
-    <top.dir>${project.basedir}/..</top.dir>
     <maven.test.skip>true</maven.test.skip>
     <source.skip>true</source.skip>
   </properties>
@@ -42,22 +41,22 @@
         <groupId>org.codehaus.mojo</groupId>
         <executions>
           <execution>
-            <id>client without version</id>
+            <id>embedded client without version</id>
             <phase>compile</phase>
             <goals>
               <goal>exec</goal>
             </goals>
             <configuration>
               <executable>ln</executable>
-              <workingDirectory>${project.basedir}/../phoenix-client-parent/phoenix-client/target</workingDirectory>
+              <workingDirectory>${project.basedir}/../phoenix-client-parent/phoenix-client-embedded/target</workingDirectory>
               <arguments>
                 <argument>-fnsv</argument>
                 <argument>
-                  phoenix-client-${hbase.suffix}-${project.version}.jar
+                  phoenix-client-embedded-${hbase.suffix}-${project.version}.jar
                 </argument>
                 <argument>
                   <!-- We are overwriting the unshaded client JAR, but we don't care -->
-                  phoenix-client-${hbase.suffix}.jar
+                  phoenix-client-embedded-${hbase.suffix}.jar
                 </argument>
               </arguments>
             </configuration>
@@ -79,6 +78,26 @@
                 <argument>
                   <!-- We are overwriting the unshaded server JAR, but we don't care -->
                   phoenix-server-${hbase.suffix}.jar
+                </argument>
+              </arguments>
+            </configuration>
+          </execution>
+          <execution>
+            <id>pherf without version</id>
+            <phase>compile</phase>
+            <goals>
+              <goal>exec</goal>
+            </goals>
+            <configuration>
+              <executable>ln</executable>
+              <workingDirectory>${project.basedir}/../phoenix-pherf/target</workingDirectory>
+              <arguments>
+                <argument>-fnsv</argument>
+                <argument>
+                  phoenix-pherf-${project.version}.jar
+                </argument>
+                <argument>
+                  phoenix-pherf.jar
                 </argument>
               </arguments>
             </configuration>
@@ -130,7 +149,7 @@
     </dependency>
     <dependency>
       <groupId>org.apache.phoenix</groupId>
-      <artifactId>phoenix-client-${hbase.suffix}</artifactId>
+      <artifactId>phoenix-client-embedded-${hbase.suffix}</artifactId>
     </dependency>
     <dependency>
       <groupId>org.apache.phoenix</groupId>
@@ -140,48 +159,11 @@
       <groupId>org.apache.phoenix</groupId>
       <artifactId>phoenix-tracing-webapp</artifactId>
     </dependency>
-
     <dependency>
-      <groupId>com.fasterxml.woodstox</groupId>
-      <artifactId>woodstox-core</artifactId>
-      <version>5.2.0</version>
-    </dependency>
-
-    <dependency>
-      <groupId>org.codehaus.woodstox</groupId>
-      <artifactId>stax2-api</artifactId>
-      <version>3.0.1</version>
-    </dependency>
-
-    <dependency>
-      <groupId>org.apache.commons</groupId>
-      <artifactId>commons-configuration2</artifactId>
-    </dependency>
-
-    <dependency>
-      <groupId>org.apache.hbase.thirdparty</groupId>
-      <artifactId>hbase-shaded-miscellaneous</artifactId>
-    </dependency>
-
-    <dependency>
-      <groupId>org.apache.hbase.thirdparty</groupId>
-      <artifactId>hbase-shaded-protobuf</artifactId>
-    </dependency>
-
-    <dependency>
-      <groupId>org.apache.hbase.thirdparty</groupId>
-      <artifactId>hbase-shaded-netty</artifactId>
-      <version>${hbase.thirdparty.version}</version>
-    </dependency>
-
-    <dependency>
-      <groupId>org.apache.commons</groupId>
-      <artifactId>commons-lang3</artifactId>
-    </dependency>
-
-    <dependency>
-      <groupId>org.apache.htrace</groupId>
-      <artifactId>htrace-core</artifactId>
+      <groupId>sqlline</groupId>
+      <artifactId>sqlline</artifactId>
+      <version>${sqlline.version}</version>
+      <classifier>jar-with-dependencies</classifier>
     </dependency>
 
   </dependencies>

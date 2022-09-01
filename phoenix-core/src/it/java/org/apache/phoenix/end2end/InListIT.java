@@ -46,12 +46,16 @@ import org.apache.phoenix.schema.types.PInteger;
 import org.apache.phoenix.thirdparty.com.google.common.base.Function;
 import org.apache.phoenix.thirdparty.com.google.common.base.Joiner;
 import org.apache.phoenix.thirdparty.com.google.common.collect.Lists;
+import org.apache.phoenix.util.EnvironmentEdgeManager;
 import org.apache.phoenix.util.PhoenixRuntime;
 import org.apache.phoenix.util.PropertiesUtil;
+import org.apache.phoenix.util.SchemaUtil;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
+import org.junit.experimental.categories.Category;
 
+@Category(ParallelStatsDisabledTest.class)
 public class InListIT extends ParallelStatsDisabledIT {
     private static final String TENANT_SPECIFIC_URL1 = getUrl() + ';' + TENANT_ID_ATTRIB + "=tenant1";
     private static boolean isInitialized = false;
@@ -73,13 +77,15 @@ public class InListIT extends ParallelStatsDisabledIT {
     }
 
     @After
-    public void cleanUp() throws SQLException {
+    public void cleanUp() throws Exception {
+        boolean refCountLeaked = isAnyStoreRefCountLeaked();
         deleteTenantData(descViewName);
         deleteTenantData(viewName1);
         deleteTenantData(viewName2);
         deleteTenantData(ascViewName);
         deleteTenantData(tableName);
         deleteTenantData(tableName2);
+        assertFalse("refCount leaked", refCountLeaked);
     }
 
     @Test
@@ -583,6 +589,58 @@ public class InListIT extends ParallelStatsDisabledIT {
             assertTrue(rs2.next());
             assertEquals(rs.getInt(1), rs2.getInt(1));
             assertEquals(0, rs.getInt(1));
+        }
+    }
+
+    @Test
+    public void testUpperWithInChar() throws Exception {
+        String baseTable = generateUniqueName();
+        try (Connection conn = DriverManager.getConnection(getUrl());
+             Statement stmt = conn.createStatement()) {
+            stmt.execute("CREATE  TABLE " + baseTable +
+                    " (ID BIGINT NOT NULL primary key, A CHAR(2))");
+            PreparedStatement pstmt = conn.prepareStatement("UPSERT INTO  " + baseTable +
+                    " VALUES (?, ?)");
+            pstmt.setInt(1, 1);
+            pstmt.setString(2, "a");
+            pstmt.executeUpdate();
+            conn.commit();
+            pstmt.setInt(1, 2);
+            pstmt.setString(2, "b");
+            pstmt.executeUpdate();
+            conn.commit();
+
+            ResultSet rs = conn.createStatement().executeQuery("SELECT * FROM " + baseTable  +
+                    " WHERE UPPER(A) IN ('A', 'C')");
+            assertTrue(rs.next());
+            assertEquals(rs.getString(2), "a");
+            assertFalse(rs.next());
+        }
+    }
+
+    @Test
+    public void testLowerWithInChar() throws Exception {
+        String baseTable = generateUniqueName();
+        try (Connection conn = DriverManager.getConnection(getUrl());
+             Statement stmt = conn.createStatement()) {
+            stmt.execute("CREATE  TABLE " + baseTable +
+                    " (ID BIGINT NOT NULL primary key, A CHAR(2))");
+            PreparedStatement pstmt = conn.prepareStatement("UPSERT INTO  " + baseTable +
+                    " VALUES (?, ?)");
+            pstmt.setInt(1, 1);
+            pstmt.setString(2, "A");
+            pstmt.executeUpdate();
+            conn.commit();
+            pstmt.setInt(1, 2);
+            pstmt.setString(2, "B");
+            pstmt.executeUpdate();
+            conn.commit();
+
+            ResultSet rs = conn.createStatement().executeQuery("SELECT * FROM " + baseTable  +
+                    " WHERE LOWER(A) IN ('a', 'c')");
+            assertTrue(rs.next());
+            assertEquals(rs.getString(2), "A");
+            assertFalse(rs.next());
         }
     }
 
@@ -1669,6 +1727,39 @@ public class InListIT extends ParallelStatsDisabledIT {
                 plan.getPlanStepsAsAttributes();
             assertTrue(explainPlanAttributes.getExplainScanType()
                 .startsWith(ExplainTable.POINT_LOOKUP_ON_STRING));
+        }
+    }
+
+    @Test
+    public void testInListExpressionWithVariableLengthColumnsRanges() throws Exception {
+        Properties props = new Properties();
+        final String schemaName = generateUniqueName();
+        final String tableName = generateUniqueName();
+        final String dataTableFullName = SchemaUtil.getTableName(schemaName, tableName);
+        String ddl =
+                "CREATE TABLE " + dataTableFullName + " (a VARCHAR(22) NOT NULL," +
+                        "b CHAR(6) NOT NULL," +
+                        "c VARCHAR(12) NOT NULL,d VARCHAR(200) NOT NULL, " +
+                        "CONSTRAINT PK_TEST_KO PRIMARY KEY (a,b,c,d)) ";
+        long startTS = EnvironmentEdgeManager.currentTimeMillis();
+        try (Connection conn = DriverManager.getConnection(getUrl(), props)) {
+            conn.createStatement().execute(ddl);
+            conn.commit();
+            conn.createStatement().execute("upsert into "+ dataTableFullName+
+                    " values('AAAA1234567890','202001','A1','foo')");
+            conn.createStatement().execute("upsert into "+ dataTableFullName+
+                    " values('AAAA1234567892','202002','A1','foo')");
+            conn.createStatement().execute("upsert into "+ dataTableFullName+
+                    " values('AAAA1234567892','202002','B1','foo')");
+            conn.createStatement().execute("upsert into "+ dataTableFullName+
+                    " values('AAAA1234567890','202001','B1','foo')");
+            conn.commit();
+            String query = "SELECT count(*) FROM "+dataTableFullName+
+                    " WHERE (a, b) IN (('AAAA1234567890', '202001'), ( 'AAAA1234567892', '202002'))" +
+                    " AND c IN ('A1')";
+            ResultSet r  = conn.createStatement().executeQuery(query);
+            r.next();
+            assertEquals(2, r.getInt(1));
         }
     }
 }

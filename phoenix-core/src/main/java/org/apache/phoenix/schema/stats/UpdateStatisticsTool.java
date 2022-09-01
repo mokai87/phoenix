@@ -18,13 +18,13 @@
 package org.apache.phoenix.schema.stats;
 
 import org.antlr.runtime.CharStream;
-import org.apache.commons.cli.CommandLine;
-import org.apache.commons.cli.CommandLineParser;
-import org.apache.commons.cli.HelpFormatter;
-import org.apache.commons.cli.Option;
-import org.apache.commons.cli.Options;
-import org.apache.commons.cli.ParseException;
-import org.apache.commons.cli.PosixParser;
+import org.apache.phoenix.thirdparty.org.apache.commons.cli.CommandLine;
+import org.apache.phoenix.thirdparty.org.apache.commons.cli.CommandLineParser;
+import org.apache.phoenix.thirdparty.org.apache.commons.cli.DefaultParser;
+import org.apache.phoenix.thirdparty.org.apache.commons.cli.HelpFormatter;
+import org.apache.phoenix.thirdparty.org.apache.commons.cli.Option;
+import org.apache.phoenix.thirdparty.org.apache.commons.cli.Options;
+import org.apache.phoenix.thirdparty.org.apache.commons.cli.ParseException;
 import org.apache.hadoop.conf.Configured;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hbase.HBaseConfiguration;
@@ -54,6 +54,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import static org.apache.hadoop.fs.CommonConfigurationKeysPublic.FS_DEFAULT_NAME_KEY;
+
+import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 
 import static org.apache.phoenix.query.QueryServices.IS_NAMESPACE_MAPPING_ENABLED;
@@ -116,7 +118,8 @@ public class UpdateStatisticsTool extends Configured implements Tool {
             Admin admin = conn.unwrap(PhoenixConnection.class).getQueryServices().getAdmin();
             boolean namespaceMapping = getConf().getBoolean(IS_NAMESPACE_MAPPING_ENABLED,
                     DEFAULT_IS_NAMESPACE_MAPPING_ENABLED);
-            String physicalTableName =  SchemaUtil.getPhysicalTableName(tableName.getBytes(),
+            String physicalTableName =  SchemaUtil.getPhysicalTableName(
+                    tableName.getBytes(StandardCharsets.UTF_8),
                     namespaceMapping).getNameAsString();
             admin.snapshot(snapshotName, TableName.valueOf(physicalTableName));
             LOGGER.info("Successfully created snapshot " + snapshotName + " for " + physicalTableName);
@@ -213,15 +216,6 @@ public class UpdateStatisticsTool extends Configured implements Tool {
         TableMapReduceUtil.addDependencyJarsForClasses(job.getConfiguration(),
                 PhoenixConnection.class, Chronology.class, CharStream.class,
                 SpanReceiver.class, Gauge.class, MetricRegistriesImpl.class);
-        try {
-            TableMapReduceUtil.addDependencyJarsForClasses(job.getConfiguration(),
-                Class.forName("org.apache.tephra.TransactionNotInProgressException"),
-                Class.forName("org.apache.tephra.TransactionSystemClient"),
-                Class.forName("org.apache.tephra.hbase.coprocessor.TransactionProcessor"),
-                Class.forName("org.apache.thrift.transport.TTransportException"));
-        } catch (Throwable t) {
-            //Tephra is excluded
-        }
 
         LOGGER.info("UpdateStatisticsTool running for: " + tableName
                 + " on snapshot: " + snapshotName + " with restore dir: " + restoreDir);
@@ -265,7 +259,10 @@ public class UpdateStatisticsTool extends Configured implements Tool {
 
         final Options options = getOptions();
 
-        CommandLineParser parser = new PosixParser();
+        CommandLineParser parser = DefaultParser.builder().
+                setAllowPartialMatching(false).
+                setStripLeadingAndTrailingQuotes(false).
+                build();
         CommandLine cmdLine = null;
         try {
             cmdLine = parser.parse(options, args);

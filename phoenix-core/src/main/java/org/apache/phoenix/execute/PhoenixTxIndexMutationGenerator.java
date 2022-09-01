@@ -48,6 +48,7 @@ import org.apache.phoenix.cache.IndexMetaDataCache;
 import org.apache.phoenix.compile.ScanRanges;
 import org.apache.phoenix.coprocessor.MetaDataProtocol;
 import org.apache.phoenix.filter.SkipScanFilter;
+import org.apache.phoenix.hbase.index.AbstractValueGetter;
 import org.apache.phoenix.hbase.index.MultiMutation;
 import org.apache.phoenix.hbase.index.ValueGetter;
 import org.apache.phoenix.hbase.index.covered.IndexMetaData;
@@ -166,8 +167,7 @@ public class PhoenixTxIndexMutationGenerator {
         }
         
         Collection<Pair<Mutation, byte[]>> indexUpdates = new ArrayList<Pair<Mutation, byte[]>>(mutations.size() * 2 * indexMaintainers.size());
-        // Track if we have row keys with Delete mutations (or Puts that are
-        // Tephra's Delete marker). If there are none, we don't need to do the scan for
+        // Track if we have row keys with Delete mutations. If there are none, we don't need to do the scan for
         // prior versions, if there are, we do. Since rollbacks always have delete mutations,
         // this logic will work there too.
         if (!findPriorValueMutations.isEmpty()) {
@@ -249,9 +249,8 @@ public class PhoenixTxIndexMutationGenerator {
             long readPtr = indexMetaData.getTransactionContext().getReadPointer();
             Result result;
             // Loop through last committed row state plus all new rows associated with current transaction
-            // to generate point delete markers for all index rows that were added. We don't have Tephra
-            // manage index rows in change sets because we don't want to be hit with the additional
-            // memory hit and do not need to do conflict detection on index rows.
+            // to generate point delete markers for all index rows that were added.
+            // Note: After PHOENIX-6627 is it worth revisiting managing index rows in change sets?
             ColumnReference emptyColRef = new ColumnReference(indexMetaData.getIndexMaintainers().get(0).getDataEmptyKeyValueCF(), indexMetaData.getIndexMaintainers().get(0).getEmptyKeyValueQualifier());
             while ((result = scanner.next()) != null) {
                 Mutation m = mutations.remove(new ImmutableBytesPtr(result.getRow()));
@@ -363,7 +362,8 @@ public class PhoenixTxIndexMutationGenerator {
                 throw new IOException(e);
             }
         }
-        Iterable<IndexUpdate> puts = codec.getIndexUpserts(state, indexMetaData, regionStartKey, regionEndKey);
+        Iterable<IndexUpdate> puts =
+                codec.getIndexUpserts(state, indexMetaData, regionStartKey, regionEndKey, true);
         boolean validPut = false;
         for (IndexUpdate put : puts) {
             if (put.isValid()) {
@@ -462,7 +462,7 @@ public class PhoenixTxIndexMutationGenerator {
                 throws IOException {
             // TODO: creating these objects over and over again is wasteful
             ColumnTracker tracker = new ColumnTracker(indexedColumns);
-            ValueGetter getter = new ValueGetter() {
+            ValueGetter getter = new AbstractValueGetter() {
 
                 @Override
                 public ImmutableBytesWritable getLatestValue(ColumnReference ref, long ts) throws IOException {

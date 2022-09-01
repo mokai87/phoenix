@@ -111,6 +111,12 @@ message PTable {
   optional bool viewModifiedPhoenixTTL = 44;
   optional int64 lastDDLTimestamp = 45;
   optional bool changeDetectionEnabled = 46;
+  optional bytes physicalTableNameBytes = 47;
+  optional bytes baseTableLogicalNameBytes = 48;
+  optional bytes schemaVersion = 49;
+  optional bytes externalSchemaId=50;
+  optional PTable transformingNewTable=51;
+  optional bytes streamingTopicName=52;
 }
 
 message EncodedCQCounter {

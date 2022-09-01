@@ -57,6 +57,7 @@ import org.apache.hadoop.hbase.coprocessor.SimpleRegionObserver;
 import org.apache.hadoop.hbase.regionserver.MiniBatchOperationInProgress;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.phoenix.end2end.ParallelStatsDisabledIT;
+import org.apache.phoenix.end2end.ParallelStatsDisabledTest;
 import org.apache.phoenix.exception.SQLExceptionCode;
 import org.apache.phoenix.jdbc.PhoenixConnection;
 import org.apache.phoenix.jdbc.PhoenixDatabaseMetaData;
@@ -74,14 +75,15 @@ import org.apache.phoenix.util.PhoenixRuntime;
 import org.apache.phoenix.util.PropertiesUtil;
 import org.apache.phoenix.util.StringUtil;
 import org.apache.phoenix.util.TestUtil;
-import org.apache.tephra.TxConstants;
 import org.junit.Test;
+import org.junit.experimental.categories.Category;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
 import org.junit.runners.Parameterized.Parameters;
 
 import org.apache.phoenix.thirdparty.com.google.common.collect.Lists;
 
+@Category(ParallelStatsDisabledTest.class)
 @RunWith(Parameterized.class)
 public class TransactionIT  extends ParallelStatsDisabledIT {
     private final String txProvider;
@@ -92,10 +94,10 @@ public class TransactionIT  extends ParallelStatsDisabledIT {
         tableDDLOptions = PhoenixDatabaseMetaData.TRANSACTION_PROVIDER + "='" + provider + "'";
     }
 
-    @Parameters(name="TransactionIT_provider={0}") // name is used by failsafe as file name in reports
+    // name is used by failsafe as file name in reports
+    @Parameters(name="TransactionIT_provider={0}")
     public static synchronized Collection<Object[]> data() {
-        return TestUtil.filterTxParamData(Arrays.asList(new Object[][] { 
-                 {"TEPHRA"},{"OMID"}}),0);
+        return Arrays.asList(new Object[][] { { "OMID" } });
     }
 
     @Test
@@ -187,13 +189,11 @@ public class TransactionIT  extends ParallelStatsDisabledIT {
         List<String> tableNames = Lists.newArrayList();
         Properties props = PropertiesUtil.deepCopy(TEST_PROPERTIES);
         try (Connection conn = DriverManager.getConnection(getUrl(), props)) {
-            for (TransactionFactory.Provider provider : TransactionFactory.Provider.values()) {
-                if (provider.runTests()) {
-                    String tableName = generateUniqueName();
-                    tableNames.add(tableName);
-                    conn.createStatement().execute(
-                            "CREATE TABLE " + tableName + " (k VARCHAR NOT NULL PRIMARY KEY, v1 VARCHAR) TRANSACTIONAL=true,TRANSACTION_PROVIDER='" + provider + "'");
-                }
+            for (TransactionFactory.Provider provider : TransactionFactory.Provider.available()) {
+              String tableName = generateUniqueName();
+              tableNames.add(tableName);
+              conn.createStatement().execute(
+                  "CREATE TABLE " + tableName + " (k VARCHAR NOT NULL PRIMARY KEY, v1 VARCHAR) TRANSACTIONAL=true,TRANSACTION_PROVIDER='" + provider + "'");
             }
             if (tableNames.size() < 2) {
                 return;
@@ -227,8 +227,8 @@ public class TransactionIT  extends ParallelStatsDisabledIT {
     public void testPreventLocalIndexCreation() throws Exception {
         Properties props = PropertiesUtil.deepCopy(TEST_PROPERTIES);
         try (Connection conn = DriverManager.getConnection(getUrl(), props)) {
-            for (TransactionFactory.Provider provider : TransactionFactory.Provider.values()) {
-                if (provider.runTests() && provider.getTransactionProvider().isUnsupported(PhoenixTransactionProvider.Feature.ALLOW_LOCAL_INDEX)) {
+            for (TransactionFactory.Provider provider : TransactionFactory.Provider.available()) {
+                if (provider.getTransactionProvider().isUnsupported(PhoenixTransactionProvider.Feature.ALLOW_LOCAL_INDEX)) {
                     String tableName = generateUniqueName();
                     conn.createStatement().execute(
                             "CREATE TABLE " + tableName + " (k VARCHAR NOT NULL PRIMARY KEY, v1 VARCHAR) TRANSACTIONAL=true,TRANSACTION_PROVIDER='" + provider + "'");
@@ -381,7 +381,7 @@ public class TransactionIT  extends ParallelStatsDisabledIT {
             if (TransactionFactory.Provider.valueOf(txProvider).getTransactionProvider().isUnsupported(Feature.ALTER_NONTX_TO_TX)) {
                 fail(txProvider + " should not allow converting a non transactional table to be transactional");
             }
-        } catch (SQLException e) { // Should fail for Omid, but not Tephra
+        } catch (SQLException e) { // Should fail for Omid
             if (!TransactionFactory.Provider.valueOf(txProvider).getTransactionProvider().isUnsupported(Feature.ALTER_NONTX_TO_TX)) {
                 throw e;
             }
@@ -547,7 +547,6 @@ public class TransactionIT  extends ParallelStatsDisabledIT {
     private static void assertTTL(Admin admin, String tableName, int ttl) throws Exception {
         TableDescriptor tableDesc = admin.getTableDescriptor(TableName.valueOf(tableName));
         for (ColumnFamilyDescriptor colDesc : tableDesc.getColumnFamilies()) {
-            assertEquals(ttl,Integer.parseInt(Bytes.toString(colDesc.getValue(Bytes.toBytes(TxConstants.PROPERTY_TTL)))));
             assertEquals(ColumnFamilyDescriptorBuilder.DEFAULT_TTL,colDesc.getTimeToLive());
         }
     }

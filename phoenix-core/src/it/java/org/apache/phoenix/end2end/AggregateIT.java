@@ -37,7 +37,9 @@ import org.apache.phoenix.util.PropertiesUtil;
 import org.apache.phoenix.util.QueryBuilder;
 import org.apache.phoenix.util.TestUtil;
 import org.junit.Test;
+import org.junit.experimental.categories.Category;
 
+@Category(ParallelStatsDisabledTest.class)
 public class AggregateIT extends BaseAggregateIT {
 
     @Test
@@ -170,7 +172,8 @@ public class AggregateIT extends BaseAggregateIT {
         assertTrue(rs.next());
         assertEquals(0,rs.getInt(1));
         initAvgGroupTable(conn, tableName, PhoenixDatabaseMetaData.GUIDE_POSTS_WIDTH + "=20 ");
-        testAvgGroupByOrderPreserving(conn, tableName, 13);
+        // When ParallelStats are disabled it is 4. When enabled it is 13
+        testAvgGroupByOrderPreserving(conn, tableName, 4);
         rs = executeQuery(conn, queryBuilder);
         assertTrue(rs.next());
         assertEquals(13,rs.getInt(1));
@@ -183,7 +186,7 @@ public class AggregateIT extends BaseAggregateIT {
         rs = executeQuery(conn, queryBuilder);
         assertTrue(rs.next());
         assertEquals(13,rs.getInt(1));
-        testAvgGroupByOrderPreserving(conn, tableName, 13);
+        testAvgGroupByOrderPreserving(conn, tableName, 4);
         conn.createStatement().execute("ALTER TABLE " + tableName + " SET " + PhoenixDatabaseMetaData.GUIDE_POSTS_WIDTH + "=100");
         testAvgGroupByOrderPreserving(conn, tableName, 6);
         conn.createStatement().execute("ALTER TABLE " + tableName + " SET " + PhoenixDatabaseMetaData.GUIDE_POSTS_WIDTH + "=null");
@@ -331,5 +334,76 @@ public class AggregateIT extends BaseAggregateIT {
         }
     }
 
+    @Test
+    public void testDistinctAggregatingResultIteratorBug6507() throws Exception {
+        doTestDistinctAggregatingResultIteratorBug6507(false, false);
+        doTestDistinctAggregatingResultIteratorBug6507(false, true);
+        doTestDistinctAggregatingResultIteratorBug6507(true, false);
+        doTestDistinctAggregatingResultIteratorBug6507(true, true);
+    }
+
+    private void doTestDistinctAggregatingResultIteratorBug6507(boolean desc ,boolean salted) throws Exception {
+        Properties props = PropertiesUtil.deepCopy(TEST_PROPERTIES);
+        Connection conn = null;
+        try {
+            conn = DriverManager.getConnection(getUrl(), props);
+            String tableName = generateUniqueName();
+            String sql = "create table " + tableName + "( "+
+                    " pk1 varchar not null , " +
+                    " pk2 varchar not null, " +
+                    " pk3 varchar not null," +
+                    " v1 varchar, " +
+                    " v2 varchar, " +
+                    " CONSTRAINT TEST_PK PRIMARY KEY ( "+
+                    "pk1 "+(desc ? "desc" : "")+", "+
+                    "pk2 "+(desc ? "desc" : "")+", "+
+                    "pk3 "+(desc ? "desc" : "")+
+                    " )) "+(salted ? "SALT_BUCKETS =4" : "split on('b')");
+            conn.createStatement().execute(sql);
+
+            conn.createStatement().execute("UPSERT INTO "+tableName+" VALUES ('a11','a12','a13','a14','a15')");
+            conn.createStatement().execute("UPSERT INTO "+tableName+" VALUES ('a21','a22','a23','a24','a25')");
+            conn.createStatement().execute("UPSERT INTO "+tableName+" VALUES ('a31','a32','a33','a38','a35')");
+            conn.createStatement().execute("UPSERT INTO "+tableName+" VALUES ('b11','b12','b13','b14','b15')");
+            conn.createStatement().execute("UPSERT INTO "+tableName+" VALUES ('b21','b22','b23','b24','b25')");
+            conn.createStatement().execute("UPSERT INTO "+tableName+" VALUES ('b31','b32','b33','b34','b35')");
+            conn.createStatement().execute("UPSERT INTO "+tableName+" VALUES ('a31','c12','c13','a34','a35')");
+            conn.createStatement().execute("UPSERT INTO "+tableName+" VALUES ('a31','a32','c13','a34','a35')");
+            conn.createStatement().execute("UPSERT INTO "+tableName+" VALUES ('a31','a32','d13','a35','a35')");
+            conn.createStatement().execute("UPSERT INTO "+tableName+" VALUES ('d31','a32','c13','a35','a35')");
+            conn.commit();
+
+            sql = "select distinct pk1,max(v1) from "+tableName+" group by pk1,pk2,pk3 order by pk1,pk2,pk3";
+
+            ResultSet rs = conn.prepareStatement(sql).executeQuery();
+            assertResultSet(rs, new Object[][]{
+                {"a11","a14"},
+                {"a21","a24"},
+                {"a31","a38"},
+                {"a31","a34"},
+                {"a31","a35"},
+                {"b11","b14"},
+                {"b21","b24"},
+                {"b31","b34"},
+                {"d31","a35"}});
+
+            sql = "select distinct pk2,max(v1) from "+tableName+" group by pk2,pk3 order by pk2,pk3";
+
+            rs = conn.prepareStatement(sql).executeQuery();
+            assertResultSet(rs, new Object[][]{
+                {"a12","a14"},
+                {"a22","a24"},
+                {"a32","a38"},
+                {"a32","a35"},
+                {"b12","b14"},
+                {"b22","b24"},
+                {"b32","b34"},
+                {"c12","a34"}});
+        } finally {
+            if(conn != null) {
+                conn.close();
+            }
+        }
+    }
 }
 

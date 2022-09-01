@@ -71,7 +71,7 @@ public interface QueryServices extends SQLCloseable {
     /**
 	 * max size to spool the the result into
 	 * ${java.io.tmpdir}/ResultSpoolerXXX.bin if
-	 * {@link QueryServices#SPOOL_THRESHOLD_BYTES_ATTRIB } is reached.
+	 * QueryServices#SPOOL_THRESHOLD_BYTES_ATTRIB is reached.
 	 * <p>
 	 * default is unlimited(-1)
 	 * <p>
@@ -133,7 +133,7 @@ public interface QueryServices extends SQLCloseable {
     public static final String MAX_SERVER_METADATA_CACHE_TIME_TO_LIVE_MS_ATTRIB = "phoenix.coprocessor.maxMetaDataCacheTimeToLiveMs";
     public static final String MAX_SERVER_METADATA_CACHE_SIZE_ATTRIB = "phoenix.coprocessor.maxMetaDataCacheSize";
     public static final String MAX_CLIENT_METADATA_CACHE_SIZE_ATTRIB = "phoenix.client.maxMetaDataCacheSize";
-
+    public static final String HA_GROUP_NAME_ATTRIB = "phoenix.ha.group";
     public static final String AUTO_UPGRADE_WHITELIST_ATTRIB = "phoenix.client.autoUpgradeWhiteList";
     // Mainly for testing to force spilling
     public static final String MAX_MEMORY_SIZE_ATTRIB = "phoenix.query.maxGlobalMemorySize";
@@ -167,6 +167,8 @@ public interface QueryServices extends SQLCloseable {
     public static final String INDEX_FAILURE_THROW_EXCEPTION_ATTRIB = "phoenix.index.failure.throw.exception";
     public static final String INDEX_FAILURE_KILL_SERVER = "phoenix.index.failure.unhandled.killserver";
 
+    public static final String INDEX_CREATE_DEFAULT_STATE = "phoenix.index.create.default.state";
+
     // Index will be partially re-built from index disable time stamp - following overlap time
     @Deprecated
     public static final String INDEX_FAILURE_HANDLING_REBUILD_OVERLAP_TIME_ATTRIB =
@@ -177,6 +179,7 @@ public interface QueryServices extends SQLCloseable {
             "phoenix.index.failure.handling.rebuild.overlap.forward.time";
     public static final String INDEX_PRIOIRTY_ATTRIB = "phoenix.index.rpc.priority";
     public static final String METADATA_PRIOIRTY_ATTRIB = "phoenix.metadata.rpc.priority";
+    public static final String SERVER_SIDE_PRIOIRTY_ATTRIB = "phoenix.serverside.rpc.priority";
     public static final String ALLOW_LOCAL_INDEX_ATTRIB = "phoenix.index.allowLocalIndex";
 
     // Retries when doing server side writes to SYSTEM.CATALOG
@@ -224,6 +227,11 @@ public interface QueryServices extends SQLCloseable {
     public static final String DEFAULT_TRANSACTION_PROVIDER_ATTRIB = "phoenix.table.transaction.provider.default";
     public static final String GLOBAL_METRICS_ENABLED = "phoenix.query.global.metrics.enabled";
 
+    public static final String TABLE_LEVEL_METRICS_ENABLED = "phoenix.monitoring.tableMetrics.enabled";
+    public static final String METRIC_PUBLISHER_ENABLED = "phoenix.monitoring.metricsPublisher.enabled";
+    public static final String METRIC_PUBLISHER_CLASS_NAME = "phoenix.monitoring.metricProvider.className";
+    public static final String ALLOWED_LIST_FOR_TABLE_LEVEL_METRICS = "phoenix.monitoring.allowedTableNames.list";
+
     // Tag Name to determine the Phoenix Client Type
     public static final String CLIENT_METRICS_TAG = "phoenix.client.metrics.tag";
     
@@ -236,7 +244,8 @@ public interface QueryServices extends SQLCloseable {
     // rpc queue configs
     public static final String INDEX_HANDLER_COUNT_ATTRIB = "phoenix.rpc.index.handler.count";
     public static final String METADATA_HANDLER_COUNT_ATTRIB = "phoenix.rpc.metadata.handler.count";
-    
+    public static final String SERVER_SIDE_HANDLER_COUNT_ATTRIB = "phoenix.rpc.serverside.handler.count";
+
     public static final String FORCE_ROW_KEY_ORDER_ATTRIB = "phoenix.query.force.rowkeyorder";
     public static final String ALLOW_USER_DEFINED_FUNCTIONS_ATTRIB = "phoenix.functions.allowUserDefinedFunctions";
     public static final String COLLECT_REQUEST_LEVEL_METRICS = "phoenix.query.request.metrics.enabled";
@@ -280,6 +289,9 @@ public interface QueryServices extends SQLCloseable {
     //max number of connections from a single client to a single cluster. 0 is unlimited.
     public static final String CLIENT_CONNECTION_MAX_ALLOWED_CONNECTIONS =
         "phoenix.client.connection.max.allowed.connections";
+    //max number of connections from a single client to a single cluster. 0 is unlimited.
+    public static final String INTERNAL_CONNECTION_MAX_ALLOWED_CONNECTIONS =
+            "phoenix.internal.connection.max.allowed.connections";
     public static final String DEFAULT_COLUMN_ENCODED_BYTES_ATRRIB  = "phoenix.default.column.encoded.bytes.attrib";
     public static final String DEFAULT_IMMUTABLE_STORAGE_SCHEME_ATTRIB  = "phoenix.default.immutable.storage.scheme";
     public static final String DEFAULT_MULTITENANT_IMMUTABLE_STORAGE_SCHEME_ATTRIB  = "phoenix.default.multitenant.immutable.storage.scheme";
@@ -306,9 +318,11 @@ public interface QueryServices extends SQLCloseable {
     public static final String WILDCARD_QUERY_DYNAMIC_COLS_ATTRIB =
             "phoenix.query.wildcard.dynamicColumns";
     public static final String LOG_LEVEL = "phoenix.log.level";
+    public static final String AUDIT_LOG_LEVEL = "phoenix.audit.log.level";
     public static final String LOG_BUFFER_SIZE = "phoenix.log.buffer.size";
     public static final String LOG_BUFFER_WAIT_STRATEGY = "phoenix.log.wait.strategy";
     public static final String LOG_SAMPLE_RATE = "phoenix.log.sample.rate";
+    public static final String LOG_HANDLER_COUNT = "phoenix.log.handler.count";
 
 	public static final String SYSTEM_CATALOG_SPLITTABLE = "phoenix.system.catalog.splittable";
 
@@ -323,10 +337,14 @@ public interface QueryServices extends SQLCloseable {
     public static final String GLOBAL_INDEX_ROW_AGE_THRESHOLD_TO_DELETE_MS_ATTRIB = "phoenix.global.index.row.age.threshold.to.delete.ms";
     // Enable the IndexRegionObserver Coprocessor
     public static final String INDEX_REGION_OBSERVER_ENABLED_ATTRIB = "phoenix.index.region.observer.enabled";
+    // Enable Phoenix server paging
+    public static final String PHOENIX_SERVER_PAGING_ENABLED_ATTRIB = "phoenix.server.paging.enabled";
     // Enable support for long view index(default is false)
     public static final String LONG_VIEW_INDEX_ENABLED_ATTRIB = "phoenix.index.longViewIndex.enabled";
     // The number of index rows to be rebuild in one RPC call
     public static final String INDEX_REBUILD_PAGE_SIZE_IN_ROWS = "phoenix.index.rebuild_page_size_in_rows";
+    // The number of index rows to be scanned in one RPC call
+    String INDEX_PAGE_SIZE_IN_ROWS = "phoenix.index.page_size_in_rows";
     // Flag indicating that server side masking of ttl expired rows is enabled.
     public static final String PHOENIX_TTL_SERVER_SIDE_MASKING_ENABLED = "phoenix.ttl.server_side.masking.enabled";
     // The time limit on the amount of work to be done in one RPC call
@@ -360,12 +378,25 @@ public interface QueryServices extends SQLCloseable {
 
     public static final String PENDING_MUTATIONS_DDL_THROW_ATTRIB = "phoenix.pending.mutations.before.ddl.throw";
 
+    // The range of bins for latency metrics for histogram.
+    public static final String PHOENIX_HISTOGRAM_LATENCY_RANGES = "phoenix.histogram.latency.ranges";
+    // The range of bins for size metrics for histogram.
+    public static final String PHOENIX_HISTOGRAM_SIZE_RANGES = "phoenix.histogram.size.ranges";
+    // This config is used to move (copy and delete) the child links from the SYSTEM.CATALOG to SYSTEM.CHILD_LINK table.
+    // As opposed to a copy and async (out of band) delete.
+    public static final String MOVE_CHILD_LINKS_DURING_UPGRADE_ENABLED = "phoenix.move.child_link.during.upgrade";
+
     /**
      * Parameter to indicate the source of operation attribute.
      * It can include metadata about the customer, service, etc.
      */
     String SOURCE_OPERATION_ATTRIB = "phoenix.source.operation";
 
+    /**
+     * Parameter to skip the system tables existence check to avoid unnecessary calls to
+     * Region server holding the SYSTEM.CATALOG table in batch oriented jobs.
+     */
+    String SKIP_SYSTEM_TABLES_EXISTENCE_CHECK = "phoenix.skip.system.tables.existence.check";
     /**
      * Get executor service used for parallel scans
      */

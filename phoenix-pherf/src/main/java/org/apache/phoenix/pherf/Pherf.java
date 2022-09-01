@@ -25,14 +25,17 @@ import java.util.List;
 import java.util.Properties;
 
 import org.apache.phoenix.thirdparty.com.google.common.annotations.VisibleForTesting;
-import org.apache.commons.cli.CommandLine;
-import org.apache.commons.cli.CommandLineParser;
-import org.apache.commons.cli.HelpFormatter;
-import org.apache.commons.cli.Options;
-import org.apache.commons.cli.ParseException;
-import org.apache.commons.cli.PosixParser;
+import org.apache.phoenix.thirdparty.com.google.common.collect.Lists;
+import org.apache.phoenix.thirdparty.org.apache.commons.cli.CommandLine;
+import org.apache.phoenix.thirdparty.org.apache.commons.cli.CommandLineParser;
+import org.apache.phoenix.thirdparty.org.apache.commons.cli.DefaultParser;
+import org.apache.phoenix.thirdparty.org.apache.commons.cli.HelpFormatter;
+import org.apache.phoenix.thirdparty.org.apache.commons.cli.Options;
+import org.apache.phoenix.thirdparty.org.apache.commons.cli.ParseException;
 import org.apache.phoenix.pherf.PherfConstants.CompareType;
 import org.apache.phoenix.pherf.PherfConstants.GeneratePhoenixStats;
+import org.apache.phoenix.pherf.configuration.DataModel;
+import org.apache.phoenix.pherf.configuration.Scenario;
 import org.apache.phoenix.pherf.configuration.XMLConfigParser;
 import org.apache.phoenix.pherf.jmx.MonitorManager;
 import org.apache.phoenix.pherf.result.ResultUtil;
@@ -40,6 +43,7 @@ import org.apache.phoenix.pherf.schema.SchemaReader;
 import org.apache.phoenix.pherf.util.GoogleChartGenerator;
 import org.apache.phoenix.pherf.util.PhoenixUtil;
 import org.apache.phoenix.pherf.util.ResourceList;
+import org.apache.phoenix.pherf.workload.mt.MultiTenantWorkload;
 import org.apache.phoenix.pherf.workload.QueryExecutor;
 import org.apache.phoenix.pherf.workload.Workload;
 import org.apache.phoenix.pherf.workload.WorkloadExecutor;
@@ -53,56 +57,66 @@ public class Pherf {
     private final PhoenixUtil phoenixUtil = PhoenixUtil.create();
 
     static {
-        options.addOption("disableSchemaApply", false, "Set to disable schema from being applied.");
-		options.addOption("disableRuntimeResult", false,
-				"Set to disable writing detailed CSV file during query execution. Those will eventually get written at the end of query execution.");
+        options.addOption("disableSchemaApply", "disableSchemaApply", false,
+                "Set to disable schema from being applied.");
+        options.addOption("disableRuntimeResult", "disableRuntimeResult", false,
+                "Set to disable writing detailed CSV file during query execution. Those will eventually get written at the end of query execution.");
         options.addOption("z", "zookeeper", true,
                 "HBase Zookeeper address for connection. Default: localhost");
         options.addOption("q", "query", false, "Executes multi-threaded query sets");
-        options.addOption("listFiles", false, "List available resource files");
+        options.addOption("listFiles", "listFiles", false, "List available resource files");
+        options.addOption("mt", "multi-tenant", false,
+                "Multi tenanted workloads based on load profiles.");
         options.addOption("l", "load", false,
                 "Pre-loads data according to specified configuration values.");
-        options.addOption("scenarioFile", true,
+        options.addOption("scenarioFile", "scenarioFile", true,
                 "Regex or file name for the Test Scenario configuration .xml file to use.");
-        options.addOption("drop", true, "Regex drop all tables with schema name as PHERF. "
+        options.addOption("scenarioName", "scenarioName", true,
+                "Regex or scenario name from the Test Scenario configuration .xml file to use.");
+        options.addOption("drop", "drop", true, "Regex drop all tables with schema name as PHERF. "
                 + "\nExample drop Event tables: -drop .*(EVENT).* Drop all: -drop .* or -drop all");
-        options.addOption("schemaFile", true,
+        options.addOption("schemaFile", "schemaFile", true,
                 "Regex or file name for the Test phoenix table schema .sql to use.");
         options.addOption("m", "monitor", false, "Launch the stats profilers");
-        options.addOption("monitorFrequency", true,
+        options.addOption("monitorFrequency", "monitorFrequency", true,
                 "Override for frequency in Ms for which monitor should log stats. "
                         + "\n See pherf.default.monitorFrequency in pherf.properties");
-        options.addOption("rowCountOverride", true,
+        options.addOption("rowCountOverride", "rowCountOverride", true,
                 "Row count override to use instead of one specified in scenario.");
-        options.addOption("hint", true, "Executes all queries with specified hint. Example SMALL");
-        options.addOption("log_per_nrows", true,
+        options.addOption("hint", "hint", true,
+                "Executes all queries with specified hint. Example SMALL");
+        options.addOption("log_per_nrows", "log_per_nrows", true,
                 "Default value to display log line after every 'N' row load");
-        options.addOption("diff", false,
+        options.addOption("diff", "diff", false,
                 "Run pherf in verification mode and diff with exported results");
-        options.addOption("export", false,
+        options.addOption("export", "export", false,
                 "Exports query results to CSV files in " + PherfConstants.EXPORT_DIR
                         + " directory");
-        options.addOption("writerThreadSize", true,
+        options.addOption("writerThreadSize", "writerThreadSize", true,
                 "Override the default number of writer threads. "
                         + "See pherf.default.dataloader.threadpool in Pherf.properties.");
         options.addOption("h", "help", false, "Get help on using this utility.");
         options.addOption("d", "debug", false, "Put tool in debug mode");
-        options.addOption("stats", false,
+        options.addOption("stats", "stats", false,
                 "Update Phoenix Statistics after data is loaded with -l argument");
-		options.addOption("label", true, "Label a run. Result file name will be suffixed with specified label");
-		options.addOption("compare", true, "Specify labeled run(s) to compare");
-		options.addOption("useAverageCompareType", false, "Compare results with Average query time instead of default is Minimum query time.");
-		    options.addOption("t", "thin", false, "Use the Phoenix Thin Driver");
-		    options.addOption("s", "server", true, "The URL for the Phoenix QueryServer");
-		    options.addOption("b", "batchApi", false, "Use JDBC Batch API for writes");
+        options.addOption("label", "label", true,
+                "Label a run. Result file name will be suffixed with specified label");
+        options.addOption("compare", "compare", true, "Specify labeled run(s) to compare");
+        options.addOption("useAverageCompareType", "useAverageCompareType", false,
+                "Compare results with Average query time instead of default is Minimum query time.");
+        options.addOption("t", "thin", false, "Use the Phoenix Thin Driver");
+        options.addOption("s", "server", true, "The URL for the Phoenix QueryServer");
+        options.addOption("b", "batchApi", false, "Use JDBC Batch API for writes");
     }
 
     private final String zookeeper;
     private final String scenarioFile;
+    private final String scenarioName;
     private final String schemaFile;
     private final String queryHint;
-    private final Properties properties;
+    private final Properties globalProperties;
     private final boolean preLoadData;
+    private final boolean multiTenantWorkload;
     private final String dropPherfTablesRegEx;
     private final boolean executeQuerySets;
     private final boolean isFunctional;
@@ -117,12 +131,23 @@ public class Pherf {
     private final CompareType compareType;
     private final boolean thinDriver;
     private final String queryServerUrl;
+    private Properties properties = new Properties();
 
     @VisibleForTesting
     WorkloadExecutor workloadExecutor;
 
+    public Pherf(String[] args, Properties connProperties) throws Exception {
+        this(args);
+        //merging global and connection properties into properties.
+        if (connProperties != null)
+            this.properties.putAll(connProperties);
+    }
+
     public Pherf(String[] args) throws Exception {
-        CommandLineParser parser = new PosixParser();
+        CommandLineParser parser = DefaultParser.builder().
+                setAllowPartialMatching(false).
+                setStripLeadingAndTrailingQuotes(false).
+                build();
         CommandLine command = null;
         HelpFormatter hf = new HelpFormatter();
 
@@ -130,23 +155,25 @@ public class Pherf {
             command = parser.parse(options, args);
         } catch (ParseException e) {
             hf.printHelp("Pherf", options);
+            LOGGER.error("Something went wrong while parsing.", e);
             System.exit(1);
         }
 
-        properties = PherfConstants.create().getProperties(PherfConstants.PHERF_PROPERTIES, false);
+        globalProperties = PherfConstants.create().getProperties(PherfConstants.PHERF_PROPERTIES, false);
         dropPherfTablesRegEx = command.getOptionValue("drop", null);
         monitor = command.hasOption("m");
         String
                 monitorFrequency =
                 (command.hasOption("m") && command.hasOption("monitorFrequency")) ?
                         command.getOptionValue("monitorFrequency") :
-                        properties.getProperty("pherf.default.monitorFrequency");
-        properties.setProperty("pherf.default.monitorFrequency", monitorFrequency);
+                        globalProperties.getProperty("pherf.default.monitorFrequency");
+        globalProperties.setProperty("pherf.default.monitorFrequency", monitorFrequency);
         LOGGER.debug("Using Monitor: " + monitor);
         LOGGER.debug("Monitor Frequency Ms:" + monitorFrequency);
-        properties.setProperty(PherfConstants.LOG_PER_NROWS_NAME, getLogPerNRow(command));
+        globalProperties.setProperty(PherfConstants.LOG_PER_NROWS_NAME, getLogPerNRow(command));
 
         preLoadData = command.hasOption("l");
+        multiTenantWorkload = command.hasOption("mt");
         executeQuerySets = command.hasOption("q");
         zookeeper = command.getOptionValue("z", "localhost");
         queryHint = command.getOptionValue("hint", null);
@@ -156,14 +183,16 @@ public class Pherf {
         writeRuntimeResults = !command.hasOption("disableRuntimeResult");
         scenarioFile =
                 command.hasOption("scenarioFile") ? command.getOptionValue("scenarioFile") : null;
+        scenarioName =
+                command.hasOption("scenarioName") ? command.getOptionValue("scenarioName") : null;
         schemaFile = command.hasOption("schemaFile") ? command.getOptionValue("schemaFile") : null;
         rowCountOverride = Integer.parseInt(command.getOptionValue("rowCountOverride", "0"));
         generateStatistics = command.hasOption("stats") ? GeneratePhoenixStats.YES : GeneratePhoenixStats.NO;
         String
                 writerThreadPoolSize =
                 command.getOptionValue("writerThreadSize",
-                        properties.getProperty("pherf.default.dataloader.threadpool"));
-        properties.setProperty("pherf.default.dataloader.threadpool", writerThreadPoolSize);
+                        globalProperties.getProperty("pherf.default.dataloader.threadpool"));
+        globalProperties.setProperty("pherf.default.dataloader.threadpool", writerThreadPoolSize);
         label = command.getOptionValue("label", null);
         compareResults = command.getOptionValue("compare", null);
         compareType = command.hasOption("useAverageCompareType") ? CompareType.AVERAGE : CompareType.MINIMUM;
@@ -194,13 +223,14 @@ public class Pherf {
             PhoenixUtil.useThinDriver(queryServerUrl);
         }
         ResultUtil.setFileSuffix(label);
+        this.properties.putAll(globalProperties);
     }
 
     private String getLogPerNRow(CommandLine command) {
         try {
             String logPerNRows = (command.hasOption("log_per_nrows")) ?
                     command.getOptionValue("log_per_nrows") :
-                        properties.getProperty(
+                        globalProperties.getProperty(
                                 PherfConstants.LOG_PER_NROWS_NAME,
                                 String.valueOf(PherfConstants.LOG_PER_NROWS)
                         );
@@ -223,6 +253,7 @@ public class Pherf {
             new Pherf(args).run();
         } catch (Exception e) {
             e.printStackTrace();
+            LOGGER.error("Something went wrong.", e);
             System.exit(1);
         }
     }
@@ -258,8 +289,6 @@ public class Pherf {
                 new GoogleChartGenerator(compareResults, compareType).readAndRender();
                 return;
             }
-            
-            XMLConfigParser parser = new XMLConfigParser(scenarioFile);
 
             // Drop tables with PHERF schema and regex comparison
             if (null != dropPherfTablesRegEx) {
@@ -269,12 +298,6 @@ public class Pherf {
                 phoenixUtil.deleteTables(dropPherfTablesRegEx);
             }
 
-            if (monitor) {
-                monitorManager =
-                        new MonitorManager(Integer.parseInt(
-                                properties.getProperty("pherf.default.monitorFrequency")));
-                workloadExecutor.add(monitorManager);
-            }
 
             if (applySchema) {
                 LOGGER.info("\nStarting to apply schema...");
@@ -286,18 +309,55 @@ public class Pherf {
                 reader.applySchema();
             }
 
+            // If no scenario file specified then we are done.
+            if (scenarioFile == null) {
+                return;
+            }
+
+            XMLConfigParser parser = new XMLConfigParser(scenarioFile);
+            if (monitor) {
+                monitorManager =
+                        new MonitorManager(Integer.parseInt(
+                                globalProperties.getProperty("pherf.default.monitorFrequency")));
+                workloadExecutor.add(monitorManager);
+            }
+
             // Schema and Data Load
-            if (preLoadData) {
+            if (preLoadData || multiTenantWorkload) {
                 LOGGER.info("\nStarting Data Load...");
-                Workload workload = new WriteWorkload(parser, generateStatistics);
+                List<Workload> newWorkloads = Lists.newArrayList();
                 try {
-                    workloadExecutor.add(workload);
+                    if (multiTenantWorkload) {
+                        for (DataModel model : parser.getDataModels()) {
+                            for (Scenario scenario : model.getScenarios()) {
+                                if ((scenarioName != null) && (scenarioName.compareTo(scenario.getName()) != 0)) {
+                                    continue;
+                                }
+                                Workload workload = new MultiTenantWorkload(phoenixUtil,
+                                        model, scenario, properties);
+                                newWorkloads.add(workload);
+                            }
+                        }
+                    } else {
+                        newWorkloads.add(new WriteWorkload(parser, properties,
+                                generateStatistics));
+                    }
+
+                    if (newWorkloads.isEmpty()) {
+                        throw new IllegalArgumentException("Found no new workload");
+                    }
+
+                    for (Workload workload : newWorkloads) {
+                        workloadExecutor.add(workload);
+                    }
 
                     // Wait for dataLoad to complete
-                    workloadExecutor.get(workload);
+                    workloadExecutor.get();
                 } finally {
-                    if (null != workload) {
-                        workload.complete();
+                    if (!newWorkloads.isEmpty()) {
+                        for (Workload workload : newWorkloads) {
+                            workload.complete();
+                        }
                     }
                 }
             } else {

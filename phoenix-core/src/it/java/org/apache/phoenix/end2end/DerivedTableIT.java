@@ -41,10 +41,8 @@ import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
-import java.sql.Statement;
 import java.util.Collection;
 import java.util.List;
-import java.util.Map;
 import java.util.Properties;
 
 import org.apache.phoenix.util.PropertiesUtil;
@@ -53,6 +51,7 @@ import org.junit.After;
 import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
+import org.junit.experimental.categories.Category;
 import org.junit.rules.TestName;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
@@ -61,6 +60,7 @@ import org.junit.runners.Parameterized.Parameters;
 import org.apache.phoenix.thirdparty.com.google.common.collect.Lists;
 
 
+@Category(ParallelStatsDisabledTest.class)
 @RunWith(Parameterized.class)
 public class DerivedTableIT extends ParallelStatsDisabledIT {
     private static final String tenantId = getOrganizationId();
@@ -101,8 +101,10 @@ public class DerivedTableIT extends ParallelStatsDisabledIT {
     }
 
     @After
-    public void cleanUp(){
-        tableName=null;
+    public void cleanUp() throws Exception {
+        boolean refCountLeaked = isAnyStoreRefCountLeaked();
+        tableName = null;
+        assertFalse("refCount leaked", refCountLeaked);
     }
 
     @Parameters(name="DerivedTableIT_{index}") // name is used by failsafe as file name in reports

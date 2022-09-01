@@ -29,6 +29,7 @@ import static org.apache.phoenix.coprocessor.UngroupedAggregateRegionObserver.se
 import static org.apache.phoenix.query.QueryConstants.AGG_TIMESTAMP;
 import static org.apache.phoenix.query.QueryConstants.SINGLE_COLUMN;
 import static org.apache.phoenix.query.QueryConstants.SINGLE_COLUMN_FAMILY;
+import static org.apache.phoenix.query.QueryConstants.UNGROUPED_AGG_ROW_KEY;
 import static org.apache.phoenix.query.QueryServices.MUTATE_BATCH_SIZE_ATTRIB;
 import static org.apache.phoenix.query.QueryServices.MUTATE_BATCH_SIZE_BYTES_ATTRIB;
 import static org.apache.phoenix.query.QueryServices.SOURCE_OPERATION_ATTRIB;
@@ -216,6 +217,7 @@ public class UngroupedAggregateRegionScanner extends BaseRegionScanner {
         }
         indexMaintainers = localIndexBytes == null ? null : IndexMaintainer.deserialize(localIndexBytes, useProto);
         indexMutations = localIndexBytes == null ? new UngroupedAggregateRegionObserver.MutationList() : new UngroupedAggregateRegionObserver.MutationList(1024);
+        byte[] transforming = scan.getAttribute(BaseScannerRegionObserver.DO_TRANSFORMING);
 
         replayMutations = scan.getAttribute(REPLAY_WRITES);
         indexUUID = scan.getAttribute(PhoenixIndexCodec.INDEX_UUID);
@@ -267,7 +269,7 @@ public class UngroupedAggregateRegionScanner extends BaseRegionScanner {
                 needToWrite = false;
             }
             maxBatchSize = conf.getInt(MUTATE_BATCH_SIZE_ATTRIB, QueryServicesOptions.DEFAULT_MUTATE_BATCH_SIZE);
-            maxBatchSizeBytes = conf.getLong(MUTATE_BATCH_SIZE_BYTES_ATTRIB,
+            maxBatchSizeBytes = conf.getLongBytes(MUTATE_BATCH_SIZE_BYTES_ATTRIB,
                     QueryServicesOptions.DEFAULT_MUTATE_BATCH_SIZE_BYTES);
         }
         minMaxQualifiers = EncodedColumnsUtil.getMinMaxQualifiersFromScan(scan);
@@ -437,7 +439,8 @@ public class UngroupedAggregateRegionScanner extends BaseRegionScanner {
                 Put put = maintainer.buildUpdateMutation(GenericKeyValueBuilder.INSTANCE,
                         valueGetter, ptr, results.get(0).getTimestamp(),
                         env.getRegion().getRegionInfo().getStartKey(),
-                        env.getRegion().getRegionInfo().getEndKey());
+                        env.getRegion().getRegionInfo().getEndKey(),
+                        false);
 
                 if (txnProvider != null) {
                     put = txnProvider.markPutAsCommitted(put, ts, ts);
@@ -461,8 +464,6 @@ public class UngroupedAggregateRegionScanner extends BaseRegionScanner {
         }
 
         mutations.add(delete);
-        // force tephra to ignore this deletes
-        delete.setAttribute(PhoenixTransactionContext.TX_ROLLBACK_ATTRIBUTE_KEY, new byte[0]);
     }
 
     void deleteCForQ(Tuple result, List<Cell> results, UngroupedAggregateRegionObserver.MutationList mutations) {
@@ -474,8 +475,6 @@ public class UngroupedAggregateRegionScanner extends BaseRegionScanner {
                     results.get(0).getRowOffset(),
                     results.get(0).getRowLength());
             delete.addColumns(deleteCF,  deleteCQ, ts);
-            // force tephra to ignore this deletes
-            delete.setAttribute(PhoenixTransactionContext.TX_ROLLBACK_ATTRIBUTE_KEY, new byte[0]);
             // TODO: We need to set SOURCE_OPERATION_ATTRIB here also. The control will come here if
             // TODO: we drop a column. We also delete metadata from SYSCAT table for the dropped column
             // TODO: and delete the column. In short, we need to set this attribute for the DM for SYSCAT metadata
@@ -659,8 +658,14 @@ public class UngroupedAggregateRegionScanner extends BaseRegionScanner {
             Cell keyValue;
             if (hasAny) {
                 byte[] value = aggregators.toBytes(rowAggregators);
-                keyValue = PhoenixKeyValueUtil.newKeyValue(CellUtil.cloneRow(lastCell), SINGLE_COLUMN_FAMILY, SINGLE_COLUMN,
-                        AGG_TIMESTAMP, value, 0, value.length);
+                if (pageSizeMs == Long.MAX_VALUE) {
+                    // Paging is not set. To be compatible with older clients, do not set the row key
+                    keyValue = PhoenixKeyValueUtil.newKeyValue(UNGROUPED_AGG_ROW_KEY, SINGLE_COLUMN_FAMILY, SINGLE_COLUMN,
+                            AGG_TIMESTAMP, value, 0, value.length);
+                } else {
+                    keyValue = PhoenixKeyValueUtil.newKeyValue(CellUtil.cloneRow(lastCell), SINGLE_COLUMN_FAMILY, SINGLE_COLUMN,
+                            AGG_TIMESTAMP, value, 0, value.length);
+                }
                 resultsToReturn.add(keyValue);
             }
             return hasMore;
@@ -683,19 +688,10 @@ public class UngroupedAggregateRegionScanner extends BaseRegionScanner {
 
     private void annotateDataMutations(UngroupedAggregateRegionObserver.MutationList mutationsList,
                                        Scan scan) {
-        byte[] tenantId =
-            scan.getAttribute(MutationState.MutationMetadataType.TENANT_ID.toString());
-        byte[] schemaName =
-            scan.getAttribute(MutationState.MutationMetadataType.SCHEMA_NAME.toString());
-        byte[] logicalTableName =
-            scan.getAttribute(MutationState.MutationMetadataType.LOGICAL_TABLE_NAME.toString());
-        byte[] tableType =
-            scan.getAttribute(MutationState.MutationMetadataType.TABLE_TYPE.toString());
-        byte[] ddlTimestamp =
-            scan.getAttribute(MutationState.MutationMetadataType.TIMESTAMP.toString());
-
+        byte[] externalSchemaRegistryId = scan.getAttribute(
+            MutationState.MutationMetadataType.EXTERNAL_SCHEMA_ID.toString());
         for (Mutation m : mutationsList) {
-            annotateMutation(m, tenantId, schemaName, logicalTableName, tableType, ddlTimestamp);
+            annotateMutation(m, externalSchemaRegistryId);
         }
     }
 }

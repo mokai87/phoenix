@@ -42,7 +42,7 @@ public class IndexWriterUtils {
 
   /**
    * Maximum number of threads to allow per-table when writing. Each writer thread (from
-   * {@link IndexWriterUtils#NUM_CONCURRENT_INDEX_WRITER_THREADS_CONF_KEY}) has a single HTable.
+   * IndexWriterUtils#NUM_CONCURRENT_INDEX_WRITER_THREADS_CONF_KEY) has a single HTable.
    * However, each table is backed by a threadpool to manage the updates to that table. this
    * specifies the number of threads to allow in each of those tables. Generally, you shouldn't need
    * to change this, unless you have a small number of indexes to which most of the writes go.
@@ -106,7 +106,7 @@ public class IndexWriterUtils {
      * factory was added as a workaround to the bug reported in
      * https://issues.apache.org/jira/browse/HBASE-18359
      */
-    private static class CoprocessorHConnectionTableFactory implements HTableFactory {
+    public static class CoprocessorHConnectionTableFactory implements HTableFactory {
         @GuardedBy("CoprocessorHConnectionTableFactory.this")
         private RegionCoprocessorEnvironment env;
         private ConnectionType connectionType;
@@ -116,12 +116,12 @@ public class IndexWriterUtils {
             this.connectionType = connectionType;
         }
 
-        private Connection getConnection() throws IOException {
+        public Connection getConnection() throws IOException {
             return ConnectionFactory.getConnection(connectionType, env);
         }
         @Override
         public Table getTable(ImmutableBytesPtr tablename) throws IOException {
-            return getConnection().getTable(TableName.valueOf(tablename.copyBytesIfNecessary()));
+            return getTable(tablename, null);
         }
 
         @Override
@@ -132,7 +132,19 @@ public class IndexWriterUtils {
         @Override
         public Table getTable(ImmutableBytesPtr tablename, ExecutorService pool)
                 throws IOException {
-            return getConnection().getTable(TableName.valueOf(tablename.copyBytesIfNecessary()), pool);
+          Connection connection = null;
+          try {
+            connection = getConnection();
+            if (pool == null) {
+              return connection.getTable(TableName.valueOf(tablename.copyBytesIfNecessary()));
+            }
+            return connection.getTable(TableName.valueOf(tablename.copyBytesIfNecessary()), pool);
+          } catch (IllegalArgumentException e) {
+            if (connection == null || connection.isClosed()) {
+              throw new IOException("Connection is null or closed. Please retry again.");
+            }
+            throw e;
+          }
         }
     }
 }

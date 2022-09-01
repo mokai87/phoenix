@@ -58,7 +58,7 @@ import org.slf4j.LoggerFactory;
 
 /**
  * The main entry point is in GroupedAggregateRegionObserver. It instantiates a SpillableGroupByCache and invokes a
- * get() method on it. There is no: "if key not exists -> put into map" case, since the cache is a Loading cache and
+ * get() method on it. There is no: {@code "if key not exists -> put into map" } case, since the cache is a Loading cache and
  * therefore handles the put under the covers. I tried to implement the final cache element accesses (RegionScanner
  * below) streaming, i.e. there is just an iterator on it and removed the existing result materialization.
  * SpillableGroupByCache implements a LRU cache using a LinkedHashMap with access order. There is a configurable an
@@ -120,10 +120,10 @@ public class SpillableGroupByCache implements GroupByCache {
     /**
      * Instantiates a Loading LRU Cache that stores key / aggregator[] tuples used for group by queries
      *
-     * @param estSize
-     * @param estValueSize
+     * @param env
+     * @param tenantId
      * @param aggs
-     * @param ctxt
+     * @param estSizeNum
      */
     public SpillableGroupByCache(final RegionCoprocessorEnvironment env, ImmutableBytesPtr tenantId,
             ServerAggregators aggs, final int estSizeNum) {
@@ -136,7 +136,8 @@ public class SpillableGroupByCache implements GroupByCache {
 
         // Compute Map initial map
         final Configuration conf = env.getConfiguration();
-        final long maxCacheSizeConf = conf.getLong(GROUPBY_MAX_CACHE_SIZE_ATTRIB, DEFAULT_GROUPBY_MAX_CACHE_MAX);
+        final long maxCacheSizeConf = conf.getLongBytes(GROUPBY_MAX_CACHE_SIZE_ATTRIB,
+                DEFAULT_GROUPBY_MAX_CACHE_MAX);
         final int numSpillFilesConf = conf.getInt(GROUPBY_SPILL_FILES_ATTRIB, DEFAULT_GROUPBY_SPILL_FILES);
 
         final int maxSizeNum = (int)(maxCacheSizeConf / estValueSize);

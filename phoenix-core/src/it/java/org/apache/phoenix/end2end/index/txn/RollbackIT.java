@@ -32,47 +32,50 @@ import java.util.Collection;
 import java.util.Properties;
 
 import org.apache.phoenix.end2end.ParallelStatsDisabledIT;
+import org.apache.phoenix.end2end.ParallelStatsDisabledTest;
 import org.apache.phoenix.query.QueryServices;
 import org.apache.phoenix.util.PropertiesUtil;
 import org.apache.phoenix.util.SchemaUtil;
 import org.apache.phoenix.util.TestUtil;
 import org.junit.Test;
+import org.junit.experimental.categories.Category;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
 import org.junit.runners.Parameterized.Parameters;
 
+@Category(ParallelStatsDisabledTest.class)
 @RunWith(Parameterized.class)
 public class RollbackIT extends ParallelStatsDisabledIT {
 	
-	private final boolean localIndex;
+    private final boolean localIndex;
     private final String tableDDLOptions;
 
-	public RollbackIT(boolean localIndex, boolean mutable, String transactionProvider) {
-		this.localIndex = localIndex;
+    public RollbackIT(boolean localIndex, boolean mutable, String transactionProvider) {
+        this.localIndex = localIndex;
         StringBuilder optionBuilder = new StringBuilder();
         optionBuilder.append(" TRANSACTION_PROVIDER='" + transactionProvider + "'");
         if (!mutable) {
             optionBuilder.append(",IMMUTABLE_ROWS=true");
         }
         this.tableDDLOptions = optionBuilder.toString();
-	}
-	
+    }
+
     private static Connection getConnection() throws SQLException {
         Properties props = PropertiesUtil.deepCopy(TEST_PROPERTIES);
         props.put(QueryServices.DEFAULT_TABLE_ISTRANSACTIONAL_ATTRIB, Boolean.toString(true));
         Connection conn = DriverManager.getConnection(getUrl(), props);
         return conn;
     }
-    
-	@Parameters(name="RollbackIT_localIndex={0},mutable={1},transactionProvider={2}") // name is used by failsafe as file name in reports
+
+    // name is used by failsafe as file name in reports
+    @Parameters(name="RollbackIT_localIndex={0},mutable={1},transactionProvider={2}")
     public static synchronized Collection<Object[]> data() {
-        return TestUtil.filterTxParamData(Arrays.asList(new Object[][] {     
-                 { false, false, "TEPHRA" }, { false, true, "TEPHRA"  },
-                 { true, false, "TEPHRA"  }, { true, true, "TEPHRA"  },
-                 { false, false, "OMID" }, { false, true, "OMID"  },
-           }),2);
+      return Arrays.asList(new Object[][] {
+          // OMID does not support local indexes
+          { false, false, "OMID" }, { false, true, "OMID" },
+      });
     }
-    
+
     @Test
     public void testRollbackOfUncommittedKeyValueIndexInsert() throws Exception {
         String tableName = "TBL_" + generateUniqueName();

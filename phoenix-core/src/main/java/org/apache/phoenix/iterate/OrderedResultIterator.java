@@ -197,7 +197,8 @@ public class OrderedResultIterator implements PeekingResultIterator {
         // Make sure we don't overflow Long, though this is really unlikely to happen.
         assert(limit == null || Long.MAX_VALUE / estimatedEntrySize >= limit + this.offset);
 
-        this.estimatedByteSize = limit == null ? 0 : (limit + this.offset) * estimatedEntrySize;
+        // Both BufferedSortedQueue and SizeBoundQueue won't allocate more than thresholdBytes.
+        this.estimatedByteSize = limit == null ? 0 : Math.min((limit + this.offset) * estimatedEntrySize, thresholdBytes);
         this.pageSizeMs = pageSizeMs;
     }
 
@@ -281,6 +282,11 @@ public class OrderedResultIterator implements PeekingResultIterator {
             final SizeAwareQueue<ResultEntry> queueEntries = ((RecordPeekingResultIterator)resultIterator).getQueueEntries();
             long startTime = EnvironmentEdgeManager.currentTimeMillis();
             for (Tuple result = delegate.next(); result != null; result = delegate.next()) {
+                // result might be empty if it was filtered by a local index
+                if (result.size() == 0) {
+                    continue;
+                }
+
                 if (isDummy(result)) {
                     dummyTuple = result;
                     return resultIterator;

@@ -18,6 +18,7 @@
 package org.apache.phoenix.query;
 
 import static org.apache.hadoop.hbase.HConstants.DEFAULT_HBASE_CLIENT_SCANNER_TIMEOUT_PERIOD;
+import static org.apache.phoenix.query.QueryServices.ALLOWED_LIST_FOR_TABLE_LEVEL_METRICS;
 import static org.apache.phoenix.query.QueryServices.ALLOW_ONLINE_TABLE_SCHEMA_UPDATE;
 import static org.apache.phoenix.query.QueryServices.ALLOW_VIEWS_ADD_NEW_CF_BASE_TABLE;
 import static org.apache.phoenix.query.QueryServices.AUTO_UPGRADE_ENABLED;
@@ -42,6 +43,7 @@ import static org.apache.phoenix.query.QueryServices.GROUPBY_SPILLABLE_ATTRIB;
 import static org.apache.phoenix.query.QueryServices.GROUPBY_SPILL_FILES_ATTRIB;
 import static org.apache.phoenix.query.QueryServices.HBASE_CLIENT_SCANNER_TIMEOUT_ATTRIB;
 import static org.apache.phoenix.query.QueryServices.IMMUTABLE_ROWS_ATTRIB;
+import static org.apache.phoenix.query.QueryServices.INDEX_CREATE_DEFAULT_STATE;
 import static org.apache.phoenix.query.QueryServices.INDEX_MUTATE_BATCH_SIZE_THRESHOLD_ATTRIB;
 import static org.apache.phoenix.query.QueryServices.INDEX_POPULATION_SLEEP_TIME;
 import static org.apache.phoenix.query.QueryServices.INDEX_REBUILD_TASK_INITIAL_DELAY;
@@ -60,6 +62,8 @@ import static org.apache.phoenix.query.QueryServices.MAX_SERVER_CACHE_TIME_TO_LI
 import static org.apache.phoenix.query.QueryServices.MAX_SERVER_METADATA_CACHE_SIZE_ATTRIB;
 import static org.apache.phoenix.query.QueryServices.MAX_SPOOL_TO_DISK_BYTES_ATTRIB;
 import static org.apache.phoenix.query.QueryServices.MAX_TENANT_MEMORY_PERC_ATTRIB;
+import static org.apache.phoenix.query.QueryServices.METRIC_PUBLISHER_CLASS_NAME;
+import static org.apache.phoenix.query.QueryServices.METRIC_PUBLISHER_ENABLED;
 import static org.apache.phoenix.query.QueryServices.MIN_STATS_UPDATE_FREQ_MS_ATTRIB;
 import static org.apache.phoenix.query.QueryServices.MUTATE_BATCH_SIZE_ATTRIB;
 import static org.apache.phoenix.query.QueryServices.NUM_RETRIES_FOR_SCHEMA_UPDATE_CHECK;
@@ -78,12 +82,14 @@ import static org.apache.phoenix.query.QueryServices.SCAN_RESULT_CHUNK_SIZE;
 import static org.apache.phoenix.query.QueryServices.SEQUENCE_CACHE_SIZE_ATTRIB;
 import static org.apache.phoenix.query.QueryServices.SEQUENCE_SALT_BUCKETS_ATTRIB;
 import static org.apache.phoenix.query.QueryServices.SERVER_SPOOL_THRESHOLD_BYTES_ATTRIB;
+import static org.apache.phoenix.query.QueryServices.SKIP_SYSTEM_TABLES_EXISTENCE_CHECK;
 import static org.apache.phoenix.query.QueryServices.SPOOL_DIRECTORY;
 import static org.apache.phoenix.query.QueryServices.STATS_CACHE_THREAD_POOL_SIZE;
 import static org.apache.phoenix.query.QueryServices.STATS_COLLECTION_ENABLED;
 import static org.apache.phoenix.query.QueryServices.STATS_GUIDEPOST_WIDTH_BYTES_ATTRIB;
 import static org.apache.phoenix.query.QueryServices.STATS_UPDATE_FREQ_MS_ATTRIB;
 import static org.apache.phoenix.query.QueryServices.STATS_USE_CURRENT_TIME_ATTRIB;
+import static org.apache.phoenix.query.QueryServices.TABLE_LEVEL_METRICS_ENABLED;
 import static org.apache.phoenix.query.QueryServices.THREAD_POOL_SIZE_ATTRIB;
 import static org.apache.phoenix.query.QueryServices.THREAD_TIMEOUT_MS_ATTRIB;
 import static org.apache.phoenix.query.QueryServices.TRACING_BATCH_SIZE;
@@ -101,6 +107,8 @@ import static org.apache.phoenix.query.QueryServices.PHOENIX_TTL_SERVER_SIDE_MAS
 
 import java.util.Map.Entry;
 
+import org.apache.hbase.thirdparty.com.google.common.annotations.VisibleForTesting;
+import org.apache.phoenix.schema.PIndexState;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.Coprocessor;
 import org.apache.hadoop.hbase.client.Consistency;
@@ -182,7 +190,7 @@ public class QueryServicesOptions {
     // Spillable GroupBy - SPGBY prefix
     //
     // Enable / disable spillable group by
-    public static boolean DEFAULT_GROUPBY_SPILLABLE = true;
+    public static final boolean DEFAULT_GROUPBY_SPILLABLE = true;
     // Number of spill files / partitions the keys are distributed to
     // Each spill file fits 2GB of data
     public static final int DEFAULT_GROUPBY_SPILL_FILES = 2;
@@ -216,11 +224,13 @@ public class QueryServicesOptions {
      * HConstants#HIGH_QOS is the max we will see to a standard table. We go higher to differentiate
      * and give some room for things in the middle
      */
+    public static final int DEFAULT_SERVER_SIDE_PRIORITY = 500;
     public static final int DEFAULT_INDEX_PRIORITY = 1000;
     public static final int DEFAULT_METADATA_PRIORITY = 2000;
     public static final boolean DEFAULT_ALLOW_LOCAL_INDEX = true;
     public static final int DEFAULT_INDEX_HANDLER_COUNT = 30;
     public static final int DEFAULT_METADATA_HANDLER_COUNT = 30;
+    public static final int DEFAULT_SERVERSIDE_HANDLER_COUNT = 30;
     public static final int DEFAULT_SYSTEM_MAX_VERSIONS = 1;
     public static final boolean DEFAULT_SYSTEM_KEEP_DELETED_CELLS = false;
 
@@ -255,6 +265,9 @@ public class QueryServicesOptions {
 
     public static final boolean DEFAULT_USE_REVERSE_SCAN = true;
 
+    public static final String DEFAULT_CREATE_INDEX_STATE= PIndexState.BUILDING.toString();
+    public static final boolean DEFAULT_DISABLE_ON_DROP = false;
+
     /**
      * Use only first time SYSTEM.SEQUENCE table is created.
      */
@@ -277,6 +290,10 @@ public class QueryServicesOptions {
     public static final String DEFAULT_TRANSACTION_PROVIDER = TransactionFactory.Provider.getDefault().name();
     public static final boolean DEFAULT_TRANSACTIONS_ENABLED = false;
     public static final boolean DEFAULT_IS_GLOBAL_METRICS_ENABLED = true;
+    public static final boolean DEFAULT_IS_TABLE_LEVEL_METRICS_ENABLED = false;
+    public static final boolean DEFAULT_IS_METRIC_PUBLISHER_ENABLED = false;
+    public static final String DEFAULT_ALLOWED_LIST_FOR_TABLE_LEVEL_METRICS = null; //All the tables metrics will be allowed.
+    public static final String DEFAULT_METRIC_PUBLISHER_CLASS_NAME = "org.apache.phoenix.monitoring.JmxMetricProvider";
     public static final String DEFAULT_CLIENT_METRICS_TAG = "FAT_CLIENT";
 
     public static final boolean DEFAULT_TRANSACTIONAL = false;
@@ -320,6 +337,8 @@ public class QueryServicesOptions {
 
     //by default, max connections from one client to one cluster is unlimited
     public static final int DEFAULT_CLIENT_CONNECTION_MAX_ALLOWED_CONNECTIONS = 0;
+    //by default, max internal connections from one client to one cluster is unlimited
+    public static final int DEFAULT_INTERNAL_CONNECTION_MAX_ALLOWED_CONNECTIONS = 0;
     public static final boolean DEFAULT_STATS_COLLECTION_ENABLED = true;
     public static final boolean DEFAULT_USE_STATS_FOR_PARALLELIZATION = true;
     
@@ -337,7 +356,9 @@ public class QueryServicesOptions {
 
     public static final long DEFAULT_GLOBAL_INDEX_ROW_AGE_THRESHOLD_TO_DELETE_MS = 7*24*60*60*1000; /* 7 days */
     public static final boolean DEFAULT_INDEX_REGION_OBSERVER_ENABLED = true;
-    public static final long DEFAULT_INDEX_REBUILD_PAGE_SIZE_IN_ROWS = 32*1024;
+    public static final boolean DEFAULT_PHOENIX_SERVER_PAGING_ENABLED = true;
+    public static final long DEFAULT_INDEX_REBUILD_PAGE_SIZE_IN_ROWS = 32 * 1024;
+    public static final long DEFAULT_INDEX_PAGE_SIZE_IN_ROWS = 32 * 1024;
 
     public static final boolean DEFAULT_ALLOW_SPLITTABLE_SYSTEM_CATALOG_ROLLBACK = false;
 
@@ -358,6 +379,7 @@ public class QueryServicesOptions {
     public static final boolean DEFAULT_COST_BASED_OPTIMIZER_ENABLED = false;
     public static final boolean DEFAULT_WILDCARD_QUERY_DYNAMIC_COLS_ATTRIB = false;
     public static final String DEFAULT_LOGGING_LEVEL = LogLevel.OFF.name();
+    public static final String DEFAULT_AUDIT_LOGGING_LEVEL = LogLevel.OFF.name();
     public static final String DEFAULT_LOG_SAMPLE_RATE = "1.0";
     public static final int DEFAULT_LOG_SALT_BUCKETS = 32;
     public static final int DEFAULT_SALT_BUCKETS = 0;
@@ -369,6 +391,11 @@ public class QueryServicesOptions {
     public static final boolean DEFAULT_LONG_VIEW_INDEX_ENABLED = false;
 
     public static final boolean DEFAULT_PENDING_MUTATIONS_DDL_THROW = false;
+    public static final boolean DEFAULT_SKIP_SYSTEM_TABLES_EXISTENCE_CHECK = false;
+    public static final boolean DEFAULT_MOVE_CHILD_LINKS_DURING_UPGRADE_ENABLED = true;
+    public static final int DEFAULT_TIMEOUT_DURING_UPGRADE_MS = 60000 * 30; // 30 mins
+    public static final int DEFAULT_SCAN_PAGE_SIZE = 32768;
+
     private final Configuration config;
 
     private QueryServicesOptions(Configuration config) {
@@ -454,6 +481,9 @@ public class QueryServicesOptions {
             .setIfUnset(CLIENT_METRICS_TAG, DEFAULT_CLIENT_METRICS_TAG)
             .setIfUnset(CLIENT_INDEX_ASYNC_THRESHOLD, DEFAULT_CLIENT_INDEX_ASYNC_THRESHOLD)
             .setIfUnset(PHOENIX_TTL_SERVER_SIDE_MASKING_ENABLED, DEFAULT_SERVER_SIDE_MASKING_ENABLED)
+            .setIfUnset(INDEX_CREATE_DEFAULT_STATE, DEFAULT_CREATE_INDEX_STATE)
+            .setIfUnset(SKIP_SYSTEM_TABLES_EXISTENCE_CHECK,
+                DEFAULT_SKIP_SYSTEM_TABLES_EXISTENCE_CHECK)
             ;
         // HBase sets this to 1, so we reset it to something more appropriate.
         // Hopefully HBase will change this, because we can't know if a user set
@@ -643,7 +673,7 @@ public class QueryServicesOptions {
     }
 
     public long getSpillableGroupByMaxCacheSize() {
-        return config.getLong(GROUPBY_MAX_CACHE_SIZE_ATTRIB, DEFAULT_GROUPBY_MAX_CACHE_MAX);
+        return config.getLongBytes(GROUPBY_MAX_CACHE_SIZE_ATTRIB, DEFAULT_GROUPBY_MAX_CACHE_MAX);
     }
 
     public int getSpillableGroupByNumSpillFiles() {
@@ -679,6 +709,34 @@ public class QueryServicesOptions {
     public boolean isGlobalMetricsEnabled() {
         return config.getBoolean(GLOBAL_METRICS_ENABLED, DEFAULT_IS_GLOBAL_METRICS_ENABLED);
     }
+
+    public String getMetricPublisherClass() {
+        return config.get(METRIC_PUBLISHER_CLASS_NAME, DEFAULT_METRIC_PUBLISHER_CLASS_NAME);
+    }
+
+    public String getAllowedListTableNames() {
+        return config.get(ALLOWED_LIST_FOR_TABLE_LEVEL_METRICS,
+                DEFAULT_ALLOWED_LIST_FOR_TABLE_LEVEL_METRICS);
+    }
+
+    public boolean isTableLevelMetricsEnabled() {
+        return config
+                .getBoolean(TABLE_LEVEL_METRICS_ENABLED, DEFAULT_IS_TABLE_LEVEL_METRICS_ENABLED);
+    }
+
+    public void setTableLevelMetricsEnabled() {
+        set(TABLE_LEVEL_METRICS_ENABLED, true);
+    }
+
+    public boolean isMetricPublisherEnabled() {
+        return config.getBoolean(METRIC_PUBLISHER_ENABLED, DEFAULT_IS_METRIC_PUBLISHER_ENABLED);
+    }
+
+    @VisibleForTesting
+    public void setAllowedListForTableLevelMetrics(String tableNameList){
+        set(ALLOWED_LIST_FOR_TABLE_LEVEL_METRICS,tableNameList);
+    }
+
 
     public boolean isUseByteBasedRegex() {
         return config.getBoolean(USE_BYTE_BASED_REGEX_ATTRIB, DEFAULT_USE_BYTE_BASED_REGEX);

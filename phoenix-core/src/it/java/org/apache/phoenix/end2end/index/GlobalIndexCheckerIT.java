@@ -38,6 +38,8 @@ import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.Timestamp;
+import java.util.Calendar;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
@@ -45,10 +47,11 @@ import java.util.Properties;
 
 import org.apache.phoenix.thirdparty.com.google.common.base.Strings;
 import org.apache.phoenix.thirdparty.com.google.common.collect.Maps;
-import org.apache.phoenix.end2end.BaseUniqueNamesOwnClusterIT;
 import org.apache.phoenix.end2end.IndexToolIT;
+import org.apache.phoenix.end2end.NeedsOwnMiniClusterTest;
 import org.apache.phoenix.hbase.index.IndexRegionObserver;
 import org.apache.phoenix.mapreduce.index.IndexTool;
+import org.apache.phoenix.query.BaseTest;
 import org.apache.phoenix.query.QueryServices;
 import org.apache.phoenix.schema.PTableImpl;
 import org.apache.phoenix.util.EnvironmentEdgeManager;
@@ -60,16 +63,16 @@ import org.junit.After;
 import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.Test;
+import org.junit.experimental.categories.Category;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
 import org.junit.runners.Parameterized.Parameters;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import org.apache.phoenix.thirdparty.com.google.common.collect.Lists;
 
+@Category(NeedsOwnMiniClusterTest.class)
 @RunWith(Parameterized.class)
-public class GlobalIndexCheckerIT extends BaseUniqueNamesOwnClusterIT {
-    private static final Logger LOGGER = LoggerFactory.getLogger(GlobalIndexCheckerIT.class);
+public class GlobalIndexCheckerIT extends BaseTest {
+
     private final boolean async;
     private String indexDDLOptions;
     private String tableDDLOptions;
@@ -114,10 +117,12 @@ public class GlobalIndexCheckerIT extends BaseUniqueNamesOwnClusterIT {
     }
 
     @After
-    public void unsetFailForTesting() {
+    public void unsetFailForTesting() throws Exception {
+        boolean refCountLeaked = isAnyStoreRefCountLeaked();
         IndexRegionObserver.setFailPreIndexUpdatesForTesting(false);
         IndexRegionObserver.setFailDataTableUpdatesForTesting(false);
         IndexRegionObserver.setFailPostIndexUpdatesForTesting(false);
+        assertFalse("refCount leaked", refCountLeaked);
     }
 
     public static void assertExplainPlan(Connection conn, String selectSql,
@@ -151,7 +156,7 @@ public class GlobalIndexCheckerIT extends BaseUniqueNamesOwnClusterIT {
                     dataTableName + " (val1) include (val2, val3)" + (async ? "ASYNC" : "") + this.indexDDLOptions);
             if (async) {
                 // run the index MR job.
-                IndexToolIT.runIndexTool(true, false, null, dataTableName, indexTableName);
+                IndexToolIT.runIndexTool(false, null, dataTableName, indexTableName);
             }
             // Count the number of index rows
             String query = "SELECT COUNT(*) from " + indexTableName;
@@ -161,6 +166,182 @@ public class GlobalIndexCheckerIT extends BaseUniqueNamesOwnClusterIT {
             assertEquals(1, rs.getInt(1));
             // Add rows and check everything is still okay
             verifyTableHealth(conn, dataTableName, indexTableName);
+        }
+    }
+
+    @Test
+    public void testPhoenixRowTimestamp() throws Exception {
+        try (Connection conn = DriverManager.getConnection(getUrl())) {
+            String dataTableName = generateUniqueName();
+            String indexTableName = generateUniqueName();
+            Timestamp initial = new Timestamp(EnvironmentEdgeManager.currentTimeMillis() - 1);
+            conn.createStatement().execute("create table " + dataTableName +
+                    " (id varchar(10) not null primary key, val1 varchar(10), val2 varchar(10), val3 varchar(10))" + tableDDLOptions);
+            conn.createStatement().execute("upsert into " + dataTableName + " values ('a', 'ab', 'abc', 'abcd')");
+            conn.commit();
+            Timestamp before = new Timestamp(EnvironmentEdgeManager.currentTimeMillis());
+            // Sleep 1ms to get a different row timestamps
+            Thread.sleep(1);
+            conn.createStatement().execute("upsert into " + dataTableName + " values ('b', 'bc', 'bcd', 'bcde')");
+            conn.commit();
+            Timestamp after = new Timestamp(EnvironmentEdgeManager.currentTimeMillis() + 1);
+            conn.createStatement().execute("CREATE INDEX " + indexTableName + " on " +
+                    dataTableName + " (val1, PHOENIX_ROW_TIMESTAMP()) " + "include (val2, val3) " + (async ? "ASYNC" : "")+ this.indexDDLOptions);
+            if (async) {
+                // Run the index MR job to rebuild the index and verify that index is built correctly
+                IndexToolIT.runIndexTool(false, null, dataTableName,
+                        indexTableName, null, 0, IndexTool.IndexVerifyType.AFTER);
+            }
+
+            String timeZoneID = Calendar.getInstance().getTimeZone().getID();
+            // Write a query to get the val2 = 'bc' with a time range query
+            String query = "SELECT  val1, val2, PHOENIX_ROW_TIMESTAMP() from " + dataTableName + " WHERE val1 = 'bc' AND " +
+                    "PHOENIX_ROW_TIMESTAMP() > TO_DATE('" + before.toString() + "','yyyy-MM-dd HH:mm:ss.SSS', '" + timeZoneID + "') AND " +
+                    "PHOENIX_ROW_TIMESTAMP() < TO_DATE('" + after.toString() + "','yyyy-MM-dd HH:mm:ss.SSS', '" + timeZoneID + "')";
+            // Verify that we will read from the index table
+            assertExplainPlan(conn, query, dataTableName, indexTableName);
+            ResultSet rs = conn.createStatement().executeQuery(query);
+            assertTrue(rs.next());
+            assertEquals("bc", rs.getString(1));
+            assertEquals("bcd", rs.getString(2));
+            assertTrue(rs.getTimestamp(3).after(before));
+            assertTrue(rs.getTimestamp(3).before(after));
+            assertFalse(rs.next());
+            // Count the number of index rows
+            rs = conn.createStatement().executeQuery("SELECT COUNT(*) from " + indexTableName);
+            assertTrue(rs.next());
+            assertEquals(2, rs.getInt(1));
+            // Add one more row with val2 ='bc' and check this does not change the result of the previous
+            // query
+            // Sleep 1ms to get a different row timestamps
+            Thread.sleep(1);
+            conn.createStatement().execute("upsert into " + dataTableName + " values ('c', 'bc', 'ccc', 'cccc')");
+            conn.commit();
+            assertExplainPlan(conn, query, dataTableName, indexTableName);
+            rs = conn.createStatement().executeQuery(query);
+            assertTrue(rs.next());
+            assertEquals("bc", rs.getString(1));
+            assertEquals("bcd", rs.getString(2));
+            assertTrue(rs.getTimestamp(3).after(before));
+            assertTrue(rs.getTimestamp(3).before(after));
+            assertFalse(rs.next());
+            // Write a time range query to get the last row with val2 ='bc'
+            query = "SELECT  val1, val2, PHOENIX_ROW_TIMESTAMP() from " + dataTableName + " WHERE val1 = 'bc' AND " +
+                    "PHOENIX_ROW_TIMESTAMP() > TO_DATE('" + after.toString() + "','yyyy-MM-dd HH:mm:ss.SSS', '" + timeZoneID + "')";
+            // Verify that we will read from the index table
+            assertExplainPlan(conn, query, dataTableName, indexTableName);
+            rs = conn.createStatement().executeQuery(query);
+            assertTrue(rs.next());
+            assertEquals("bc", rs.getString(1));
+            assertEquals("ccc", rs.getString(2));
+            assertTrue(rs.getTimestamp(3).after(after));
+            assertFalse(rs.next());
+            // Verify that we can execute the same query without using the index
+            String noIndexQuery = "SELECT /*+ NO_INDEX */ val1, val2, PHOENIX_ROW_TIMESTAMP() from " + dataTableName + " WHERE val1 = 'bc' AND " +
+                    "PHOENIX_ROW_TIMESTAMP() > TO_DATE('" + after.toString() + "','yyyy-MM-dd HH:mm:ss.SSS', '" + timeZoneID + "')";
+            // Verify that we will read from the data table
+            rs = conn.createStatement().executeQuery("EXPLAIN " + noIndexQuery);
+            String explainPlan = QueryUtil.getExplainPlan(rs);
+            assertTrue(explainPlan.contains("FULL SCAN OVER " + dataTableName));
+            rs = conn.createStatement().executeQuery(noIndexQuery);
+            assertTrue(rs.next());
+            assertEquals("bc", rs.getString(1));
+            assertEquals("ccc", rs.getString(2));
+            assertTrue(rs.getTimestamp(3).after(after));
+            after = rs.getTimestamp(3);
+            assertFalse(rs.next());
+            // Add an unverified index row
+            IndexRegionObserver.setFailPostIndexUpdatesForTesting(true);
+            // Sleep 1ms to get a different row timestamps
+            Thread.sleep(1);
+            conn.createStatement().execute("upsert into " + dataTableName + " values ('d', 'de', 'def', 'defg')");
+            conn.commit();
+            IndexRegionObserver.setFailPostIndexUpdatesForTesting(false);
+            // Make sure that we can repair the unverified row
+            query = "SELECT  val1, val2, PHOENIX_ROW_TIMESTAMP()  from " + dataTableName + " WHERE val1 = 'de'";
+            // Verify that we will read from the index table
+            assertExplainPlan(conn, query, dataTableName, indexTableName);
+            rs = conn.createStatement().executeQuery(query);
+            assertTrue(rs.next());
+            assertEquals("de", rs.getString(1));
+            assertEquals("def", rs.getString(2));
+            assertTrue(rs.getTimestamp(3).after(after));
+            assertFalse(rs.next());
+            // Add a new index where the index row key starts with PHOENIX_ROW_TIMESTAMP()
+            indexTableName = generateUniqueName();
+            conn.createStatement().execute("CREATE INDEX " + indexTableName + " on " +
+                    dataTableName + " (PHOENIX_ROW_TIMESTAMP()) " + "include (val1, val2, val3) " +
+                    (async ? "ASYNC" : "")+ this.indexDDLOptions);
+            if (async) {
+                // Run the index MR job to rebuild the index and verify that index is built correctly
+                IndexToolIT.runIndexTool(false, null, dataTableName,
+                        indexTableName, null, 0, IndexTool.IndexVerifyType.AFTER);
+            }
+            // Add one more row
+            // Sleep 1ms to get a different row timestamps
+            Thread.sleep(1);
+            conn.createStatement().execute("upsert into " + dataTableName + " values ('e', 'ae', 'efg', 'efgh')");
+            conn.commit();
+            // Write a query to get all the rows in the order of their timestamps
+            query = "SELECT  val1, val2, PHOENIX_ROW_TIMESTAMP() from " + dataTableName + " WHERE " +
+                    "PHOENIX_ROW_TIMESTAMP() > TO_DATE('" + initial.toString() + "','yyyy-MM-dd HH:mm:ss.SSS', '" + timeZoneID + "')";
+            // Verify that we will read from the index table
+            assertExplainPlan(conn, query, dataTableName, indexTableName);
+            rs = conn.createStatement().executeQuery(query);
+            assertTrue(rs.next());
+            assertEquals("ab", rs.getString(1));
+            assertEquals("abc", rs.getString(2));
+            assertTrue(rs.next());
+            assertEquals("bc", rs.getString(1));
+            assertEquals("bcd", rs.getString(2));
+            assertTrue(rs.next());
+            assertEquals("bc", rs.getString(1));
+            assertEquals("ccc", rs.getString(2));
+            assertTrue(rs.next());
+            assertEquals("de", rs.getString(1));
+            assertEquals("def", rs.getString(2));
+            assertTrue(rs.next());
+            assertEquals("ae", rs.getString(1));
+            assertEquals("efg", rs.getString(2));
+            assertFalse(rs.next());
+            conn.createStatement().execute("DROP INDEX " + indexTableName + " on " +
+                    dataTableName);
+            // Run the previous test on an uncovered global index
+            indexTableName = generateUniqueName();
+            conn.createStatement().execute("CREATE INDEX " + indexTableName + " on " +
+                    dataTableName + " (PHOENIX_ROW_TIMESTAMP())" +
+                    (async ? "ASYNC" : "")+ this.indexDDLOptions);
+            if (async) {
+                // Run the index MR job to rebuild the index and verify that index is built correctly
+                IndexToolIT.runIndexTool(false, null, dataTableName,
+                        indexTableName, null, 0, IndexTool.IndexVerifyType.AFTER);
+            }
+            // Verify that without hint, the index table is not selected
+            assertIndexTableNotSelected(conn, dataTableName, indexTableName, query);
+
+            // Verify that we will read from the index table with the index hint
+            query = "SELECT /*+ INDEX(" + dataTableName + " " + indexTableName + ")*/ " +
+                    "val1, val2, PHOENIX_ROW_TIMESTAMP() from " + dataTableName + " WHERE " +
+                    "PHOENIX_ROW_TIMESTAMP() > TO_DATE('" + initial.toString() + "','yyyy-MM-dd HH:mm:ss.SSS', '" + timeZoneID + "')";
+
+            assertExplainPlan(conn, query, dataTableName, indexTableName);
+            rs = conn.createStatement().executeQuery(query);
+            assertTrue(rs.next());
+            assertEquals("ab", rs.getString(1));
+            assertEquals("abc", rs.getString(2));
+            assertTrue(rs.next());
+            assertEquals("bc", rs.getString(1));
+            assertEquals("bcd", rs.getString(2));
+            assertTrue(rs.next());
+            assertEquals("bc", rs.getString(1));
+            assertEquals("ccc", rs.getString(2));
+            assertTrue(rs.next());
+            assertEquals("de", rs.getString(1));
+            assertEquals("def", rs.getString(2));
+            assertTrue(rs.next());
+            assertEquals("ae", rs.getString(1));
+            assertEquals("efg", rs.getString(2));
+            assertFalse(rs.next());
         }
     }
 
@@ -184,7 +365,7 @@ public class GlobalIndexCheckerIT extends BaseUniqueNamesOwnClusterIT {
             conn.createStatement().executeUpdate(dml);
             conn.commit();
             // Make sure this delete attempt did not make the index and data table inconsistent
-            IndexToolIT.runIndexTool(true, false, "", dataTableName, indexTableName, null,
+            IndexToolIT.runIndexTool(false, "", dataTableName, indexTableName, null,
                     0, IndexTool.IndexVerifyType.ONLY);
         }
     }
@@ -285,6 +466,16 @@ public class GlobalIndexCheckerIT extends BaseUniqueNamesOwnClusterIT {
         }
     }
 
+    private void assertIndexTableNotSelected(Connection conn, String dataTableName, String indexTableName, String sql)
+            throws Exception {
+        try {
+            assertExplainPlan(conn, sql, dataTableName, indexTableName);
+            throw new AssertionError("The index table should not be selected without an index hint");
+        } catch (AssertionError error){
+            //expected
+        }
+    }
+
     @Test
     public void testSimulateConcurrentUpdates() throws Exception {
         try (Connection conn = DriverManager.getConnection(getUrl())) {
@@ -295,7 +486,7 @@ public class GlobalIndexCheckerIT extends BaseUniqueNamesOwnClusterIT {
                     dataTableName + " (val1) include (val2, val3)" + (async ? "ASYNC" : "") + this.indexDDLOptions);
             if (async) {
                 // run the index MR job.
-                IndexToolIT.runIndexTool(true, false, null, dataTableName, indexTableName);
+                IndexToolIT.runIndexTool(false, null, dataTableName, indexTableName);
             }
             // For the concurrent updates on the same row, the last write phase is ignored.
             // Configure IndexRegionObserver to fail the last write phase (i.e., the post index update phase) where the
@@ -339,7 +530,7 @@ public class GlobalIndexCheckerIT extends BaseUniqueNamesOwnClusterIT {
                     dataTableName + " (val1) include (val2, val3)" + (async ? "ASYNC" : "") + this.indexDDLOptions);
             if (async) {
                 // run the index MR job.
-                IndexToolIT.runIndexTool(true, false, null, dataTableName, indexTableName);
+                IndexToolIT.runIndexTool(false, null, dataTableName, indexTableName);
             }
             String selectSql = "SELECT id from " + dataTableName + " WHERE val1  = 'ab'";
             ResultSet rs = conn.createStatement().executeQuery(selectSql);
@@ -384,7 +575,7 @@ public class GlobalIndexCheckerIT extends BaseUniqueNamesOwnClusterIT {
                 dataTableName + " (val1) include (val2, val3)" + (async ? "ASYNC" : "") + this.indexDDLOptions);
         if (async) {
             // run the index MR job.
-            IndexToolIT.runIndexTool(true, false, null, dataTableName, indexTableName);
+            IndexToolIT.runIndexTool(false, null, dataTableName, indexTableName);
         }
         conn.createStatement().execute("upsert into " + dataTableName + " (id, val2) values ('a', 'abcc')");
         conn.commit();
@@ -477,7 +668,7 @@ public class GlobalIndexCheckerIT extends BaseUniqueNamesOwnClusterIT {
                     dataTableName + " (val1) include (val2, val3)" + (async ? "ASYNC" : "") + this.indexDDLOptions);
             if (async) {
                 // run the index MR job.
-                IndexToolIT.runIndexTool(true, false, null, dataTableName, indexTableName);
+                IndexToolIT.runIndexTool(false, null, dataTableName, indexTableName);
             }
             // Configure IndexRegionObserver to fail the first write phase (i.e., the pre index update phase). This should not
             // lead to any change on index or data table rows
@@ -510,7 +701,7 @@ public class GlobalIndexCheckerIT extends BaseUniqueNamesOwnClusterIT {
                     dataTableName + " (val1) include (val2, val3)" + (async ? "ASYNC" : "") + this.indexDDLOptions);
             if (async) {
                 // run the index MR job.
-                IndexToolIT.runIndexTool(true, false, null, dataTableName, indexTableName);
+                IndexToolIT.runIndexTool(false, null, dataTableName, indexTableName);
             }
             // Configure IndexRegionObserver to fail the last write phase (i.e., the post index update phase) where the verify flag is set
             // to true and/or index rows are deleted and check that this does not impact the correctness
@@ -519,7 +710,7 @@ public class GlobalIndexCheckerIT extends BaseUniqueNamesOwnClusterIT {
             conn.commit();
             conn.createStatement().execute("upsert into " + dataTableName + " (id, val1, val2) values ('c', 'cd','cde')");
             conn.commit();
-            IndexTool indexTool = IndexToolIT.runIndexTool(true, false, "", dataTableName, indexTableName, null, 0, IndexTool.IndexVerifyType.ONLY);
+            IndexTool indexTool = IndexToolIT.runIndexTool(false, "", dataTableName, indexTableName, null, 0, IndexTool.IndexVerifyType.ONLY);
             assertEquals(3, indexTool.getJob().getCounters().findCounter(INPUT_RECORDS).getValue());
             assertEquals(3, indexTool.getJob().getCounters().findCounter(SCANNED_DATA_ROW_COUNT).getValue());
             assertEquals(0, indexTool.getJob().getCounters().findCounter(REBUILT_INDEX_ROW_COUNT).getValue());
@@ -657,8 +848,8 @@ public class GlobalIndexCheckerIT extends BaseUniqueNamesOwnClusterIT {
                     dataTableName + " (val2) include (val1, val3)" + (async ? "ASYNC" : "") + this.indexDDLOptions);
             if (async) {
                 // run the index MR job.
-                IndexToolIT.runIndexTool(true, false, null, dataTableName, indexTableName + "1");
-                IndexToolIT.runIndexTool(true, false, null, dataTableName, indexTableName + "2");
+                IndexToolIT.runIndexTool(false, null, dataTableName, indexTableName + "1");
+                IndexToolIT.runIndexTool(false, null, dataTableName, indexTableName + "2");
             }
             // Two Phase write. This write is recoverable
             IndexRegionObserver.setFailPostIndexUpdatesForTesting(true);
@@ -777,8 +968,8 @@ public class GlobalIndexCheckerIT extends BaseUniqueNamesOwnClusterIT {
         conn.commit();
         if (async) {
             // run the index MR job.
-            IndexToolIT.runIndexTool(true, false, null, dataTableName, indexTableName + "1");
-            IndexToolIT.runIndexTool(true, false, null, dataTableName, indexTableName + "2");
+            IndexToolIT.runIndexTool(false, null, dataTableName, indexTableName + "1");
+            IndexToolIT.runIndexTool(false, null, dataTableName, indexTableName + "2");
         }
     }
 
@@ -876,6 +1067,34 @@ public class GlobalIndexCheckerIT extends BaseUniqueNamesOwnClusterIT {
                 assertEquals("2", rs.getString("id"));
                 assertEquals("c2", rs.getString("val3"));
             }
+        }
+    }
+
+    @Test
+    public void testOnDuplicateKeyWithIndex() throws Exception {
+        if (async || encoded) { // run only once with single cell encoding enabled
+            return;
+        }
+        try (Connection conn = DriverManager.getConnection(getUrl())) {
+            String dataTableName = generateUniqueName();
+            String indexTableName = generateUniqueName();
+            populateTable(dataTableName); // with two rows ('a', 'ab', 'abc', 'abcd') and ('b', 'bc', 'bcd', 'bcde')
+            conn.createStatement().execute("CREATE INDEX " + indexTableName + " on " +
+                    dataTableName + " (val1) include (val2, val3)" + this.indexDDLOptions);
+            conn.commit();
+            String upsertSql = "UPSERT INTO " + dataTableName + " VALUES ('a') ON DUPLICATE KEY UPDATE " +
+                "val1 = val1 || val1, val2 = val2 || val2";
+            conn.createStatement().execute(upsertSql);
+            conn.commit();
+            String selectSql = "SELECT * from " + dataTableName + " WHERE val1 = 'abab'";
+            assertExplainPlan(conn, selectSql, dataTableName, indexTableName);
+            ResultSet rs = conn.createStatement().executeQuery(selectSql);
+            assertTrue(rs.next());
+            assertEquals("a", rs.getString(1));
+            assertEquals("abab", rs.getString(2));
+            assertEquals("abcabc", rs.getString(3));
+            assertEquals("abcd", rs.getString(4));
+            assertFalse(rs.next());
         }
     }
 

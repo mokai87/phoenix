@@ -42,6 +42,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.apache.phoenix.end2end.ParallelStatsDisabledIT;
+import org.apache.phoenix.end2end.ParallelStatsDisabledTest;
 import org.apache.phoenix.jdbc.PhoenixDatabaseMetaData;
 import org.apache.phoenix.jdbc.PhoenixEmbeddedDriver;
 import org.apache.phoenix.query.ConnectionQueryServices;
@@ -56,6 +57,7 @@ import org.apache.phoenix.util.PropertiesUtil;
 import org.apache.phoenix.util.SchemaUtil;
 import org.apache.phoenix.util.TestUtil;
 import org.junit.Test;
+import org.junit.experimental.categories.Category;
 import org.mockito.Mockito;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -64,6 +66,7 @@ import org.slf4j.LoggerFactory;
  * Verifies the number of RPC calls from {@link MetaDataClient} updateCache() 
  * for transactional and non-transactional tables.
  */
+@Category(ParallelStatsDisabledTest.class)
 public class UpdateCacheIT extends ParallelStatsDisabledIT {
 
     private static final Logger LOGGER =
@@ -79,17 +82,15 @@ public class UpdateCacheIT extends ParallelStatsDisabledIT {
     
     @Test
     public void testUpdateCacheForTxnTable() throws Exception {
-        for (TransactionFactory.Provider provider : TransactionFactory.Provider.values()) {
-            if (provider.runTests()) {
-                String tableName = generateUniqueName();
-                String fullTableName = INDEX_DATA_SCHEMA + QueryConstants.NAME_SEPARATOR + tableName;
-                Connection conn = DriverManager.getConnection(getUrl(), PropertiesUtil.deepCopy(TEST_PROPERTIES));
-                conn.createStatement().execute("create table " + fullTableName + TestUtil.TEST_TABLE_SCHEMA + "TRANSACTIONAL=true,TRANSACTION_PROVIDER='" + provider + "'");
-                helpTestUpdateCache(fullTableName, new int[] {1, 1}, false);
-            }
+        for (TransactionFactory.Provider provider : TransactionFactory.Provider.available()) {
+            String tableName = generateUniqueName();
+            String fullTableName = INDEX_DATA_SCHEMA + QueryConstants.NAME_SEPARATOR + tableName;
+            Connection conn = DriverManager.getConnection(getUrl(), PropertiesUtil.deepCopy(TEST_PROPERTIES));
+            conn.createStatement().execute("create table " + fullTableName + TestUtil.TEST_TABLE_SCHEMA + "TRANSACTIONAL=true,TRANSACTION_PROVIDER='" + provider + "'");
+            helpTestUpdateCache(fullTableName, new int[] {1, 1}, false);
         }
     }
-    
+
     @Test
     public void testUpdateCacheForNonTxnTable() throws Exception {
         String tableName = generateUniqueName();

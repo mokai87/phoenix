@@ -49,6 +49,7 @@ import org.apache.phoenix.execute.MutationState;
 import org.apache.phoenix.execute.MutationState.MultiRowMutationState;
 import org.apache.phoenix.execute.MutationState.RowMutationState;
 import org.apache.phoenix.filter.SkipScanFilter;
+import org.apache.phoenix.hbase.index.AbstractValueGetter;
 import org.apache.phoenix.hbase.index.ValueGetter;
 import org.apache.phoenix.hbase.index.covered.update.ColumnReference;
 import org.apache.phoenix.hbase.index.util.ImmutableBytesPtr;
@@ -144,7 +145,9 @@ public class DeleteCompiler {
         final boolean autoFlush = connection.getAutoCommit() || tableRef.getTable().isTransactional();
         ConnectionQueryServices services = connection.getQueryServices();
         final int maxSize = services.getProps().getInt(QueryServices.MAX_MUTATION_SIZE_ATTRIB,QueryServicesOptions.DEFAULT_MAX_MUTATION_SIZE);
-        final long maxSizeBytes = services.getProps().getLong(QueryServices.MAX_MUTATION_SIZE_BYTES_ATTRIB,QueryServicesOptions.DEFAULT_MAX_MUTATION_SIZE_BYTES);
+        final long maxSizeBytes = services.getProps()
+                .getLongBytes(QueryServices.MAX_MUTATION_SIZE_BYTES_ATTRIB,
+                        QueryServicesOptions.DEFAULT_MAX_MUTATION_SIZE_BYTES);
         final int batchSize = Math.min(connection.getMutateBatchSize(), maxSize);
         MultiRowMutationState mutations = new MultiRowMutationState(batchSize);
         List<MultiRowMutationState> otherMutations = null;
@@ -171,7 +174,7 @@ public class DeleteCompiler {
         try (final PhoenixResultSet rs = new PhoenixResultSet(iterator, projector, context)) {
             ValueGetter getter = null;
             if (!otherTableRefs.isEmpty()) {
-                getter = new ValueGetter() {
+                getter = new AbstractValueGetter() {
                     final ImmutableBytesWritable valuePtr = new ImmutableBytesWritable();
                     final ImmutableBytesWritable rowKeyPtr = new ImmutableBytesWritable();
     
@@ -248,10 +251,10 @@ public class DeleteCompiler {
                     if (table.getType() == PTableType.INDEX) {
                         otherRowKeyPtr.set(scannedIndexMaintainer.buildDataRowKey(rowKeyPtr, viewConstants));
                         if (otherTable.getType() == PTableType.INDEX) {
-                            otherRowKeyPtr.set(maintainers[i].buildRowKey(getter, otherRowKeyPtr, null, null, HConstants.LATEST_TIMESTAMP));
+                            otherRowKeyPtr.set(maintainers[i].buildRowKey(getter, otherRowKeyPtr, null, null, rs.getCurrentRow().getValue(0).getTimestamp()));
                         }
                     } else {
-                        otherRowKeyPtr.set(maintainers[i].buildRowKey(getter, rowKeyPtr, null, null, HConstants.LATEST_TIMESTAMP));
+                        otherRowKeyPtr.set(maintainers[i].buildRowKey(getter, rowKeyPtr, null, null, rs.getCurrentRow().getValue(0).getTimestamp()));
                     }
                     otherMutations.get(i).put(otherRowKeyPtr, new RowMutationState(PRow.DELETE_MARKER, 0, statement.getConnection().getStatementExecutionCounter(), NULL_ROWTIMESTAMP_INFO, null));
                 }
@@ -343,7 +346,7 @@ public class DeleteCompiler {
         if (!table.getIndexes().isEmpty()) {
             List<PTable> nonDisabledIndexes = Lists.newArrayListWithExpectedSize(table.getIndexes().size());
             for (PTable index : table.getIndexes()) {
-                if (index.getIndexState() != PIndexState.DISABLE && isMaintainedOnClient(index)) {
+                if (!index.getIndexState().isDisabled() && isMaintainedOnClient(index)) {
                     nonDisabledIndexes.add(index);
                 }
             }
@@ -586,7 +589,9 @@ public class DeleteCompiler {
         }
 
         final int maxSize = services.getProps().getInt(QueryServices.MAX_MUTATION_SIZE_ATTRIB,QueryServicesOptions.DEFAULT_MAX_MUTATION_SIZE);
-        final long maxSizeBytes = services.getProps().getLong(QueryServices.MAX_MUTATION_SIZE_BYTES_ATTRIB,QueryServicesOptions.DEFAULT_MAX_MUTATION_SIZE_BYTES);
+        final long maxSizeBytes = services.getProps()
+                .getLongBytes(QueryServices.MAX_MUTATION_SIZE_BYTES_ATTRIB,
+                        QueryServicesOptions.DEFAULT_MAX_MUTATION_SIZE_BYTES);
  
         // If we're doing a query for a set of rows with no where clause, then we don't need to contact the server at all.
         if (noQueryReqd) {

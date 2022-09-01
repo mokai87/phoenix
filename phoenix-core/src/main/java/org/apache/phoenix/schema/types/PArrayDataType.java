@@ -37,6 +37,8 @@ import org.apache.phoenix.util.ByteUtil;
 import org.apache.phoenix.util.SchemaUtil;
 import org.apache.phoenix.util.TrustedByteArrayOutputStream;
 
+import edu.umd.cs.findbugs.annotations.SuppressWarnings;
+
 import org.apache.phoenix.thirdparty.com.google.common.base.Objects;
 import org.apache.phoenix.thirdparty.com.google.common.base.Preconditions;
 
@@ -44,8 +46,8 @@ import org.apache.phoenix.thirdparty.com.google.common.base.Preconditions;
  * The datatype for PColummns that are Arrays. Any variable length array would follow the below order. Every element
  * would be seperated by a seperator byte '0'. Null elements are counted and once a first non null element appears we
  * write the count of the nulls prefixed with a seperator byte. Trailing nulls are not taken into account. The last non
- * null element is followed by two seperator bytes. For eg a, b, null, null, c, null -> 65 0 66 0 0 2 67 0 0 0 a null
- * null null b c null d -> 65 0 0 3 66 0 67 0 0 1 68 0 0 0. The reason we use this serialization format is to allow the
+ * null element is followed by two seperator bytes. For eg {@code a, b, null, null, c, null -> 65 0 66 0 0 2 67 0 0 0 a null
+ * null null b c null d -> 65 0 0 3 66 0 67 0 0 1 68 0 0 0 }. The reason we use this serialization format is to allow the
  * byte array of arrays of the same type to be directly comparable against each other. This prevents a costly
  * deserialization on compare and allows an array column to be used as the last column in a primary key constraint.
  */
@@ -310,6 +312,8 @@ public abstract class PArrayDataType<T> extends PDataType<T> {
         return true;
     }
 
+    @SuppressWarnings(value="RC_REF_COMPARISON",
+            justification="PDataTypes are expected to be singletons")
     private void coerceBytes(ImmutableBytesWritable ptr, Object value, PDataType actualType, Integer maxLength,
             Integer scale, Integer desiredMaxLength, Integer desiredScale, PDataType desiredType,
             SortOrder actualSortOrder, SortOrder desiredSortOrder, 

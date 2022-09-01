@@ -39,10 +39,11 @@ import org.apache.phoenix.util.ReadOnlyProps;
 
 import org.junit.BeforeClass;
 import org.junit.Test;
-
+import org.junit.experimental.categories.Category;
 import org.apache.phoenix.thirdparty.com.google.common.collect.Maps;
 
-public class CostBasedDecisionIT extends BaseUniqueNamesOwnClusterIT {
+@Category(NeedsOwnMiniClusterTest.class)
+public class CostBasedDecisionIT extends BaseTest {
     private final String testTable500;
     private final String testTable990;
     private final String testTable1000;
@@ -361,10 +362,12 @@ public class CostBasedDecisionIT extends BaseUniqueNamesOwnClusterIT {
             verifyQueryPlan(query,
                     "UNION ALL OVER 2 QUERIES\n" +
                     "    CLIENT PARALLEL 1-WAY RANGE SCAN OVER " + tableName + " [1]\n" +
+                    "        SERVER MERGE [0.C2]\n" +
                     "        SERVER FILTER BY FIRST KEY ONLY AND \"ROWKEY\" <= 'z'\n" +
                     "        SERVER AGGREGATE INTO ORDERED DISTINCT ROWS BY [\"C1\"]\n" +
                     "    CLIENT MERGE SORT\n" +
                     "    CLIENT PARALLEL 1-WAY RANGE SCAN OVER " + tableName + " [1]\n" +
+                    "        SERVER MERGE [0.C2]\n" +
                     "        SERVER FILTER BY FIRST KEY ONLY AND \"ROWKEY\" >= 'a'\n" +
                     "        SERVER AGGREGATE INTO ORDERED DISTINCT ROWS BY [\"C1\"]\n" +
                     "    CLIENT MERGE SORT");
@@ -413,11 +416,13 @@ public class CostBasedDecisionIT extends BaseUniqueNamesOwnClusterIT {
             // Use the optimal plan based on cost when stats become available.
             verifyQueryPlan(query,
                     "CLIENT PARALLEL 626-WAY RANGE SCAN OVER " + tableName + " [1,'X0'] - [1,'X1']\n" +
+                    "    SERVER MERGE [0.C2]\n" +
                     "    SERVER FILTER BY FIRST KEY ONLY\n" +
                     "    SERVER SORTED BY [\"T1.:ROWKEY\"]\n" +
                     "CLIENT MERGE SORT\n" +
                     "    PARALLEL INNER-JOIN TABLE 0\n" +
                     "        CLIENT PARALLEL 1-WAY RANGE SCAN OVER " + tableName + " [1]\n" +
+                    "            SERVER MERGE [0.C2]\n" +
                     "            SERVER FILTER BY FIRST KEY ONLY AND \"ROWKEY\" <= 'z'\n" +
                     "            SERVER AGGREGATE INTO ORDERED DISTINCT ROWS BY [\"C1\"]\n" +
                     "        CLIENT MERGE SORT\n" +

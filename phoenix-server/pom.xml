@@ -24,11 +24,11 @@
   <parent>
     <groupId>org.apache.phoenix</groupId>
     <artifactId>phoenix</artifactId>
-    <version>5.1.0-SNAPSHOT</version>
+    <version>5.2.0-SNAPSHOT</version>
   </parent>
   <artifactId>phoenix-server-${hbase.suffix}</artifactId>
-  <name>Phoenix Server JAR for HBase ${hbase.profile}</name>
-  <description>Phoenix HBase Server Side JAR for HBase ${hbase.profile}</description>
+  <name>Phoenix Server JAR</name>
+  <description>Phoenix HBase Server Side JAR</description>
   <packaging>jar</packaging>
   <properties>
     <!-- Don't make a test-jar -->
@@ -36,7 +36,6 @@
     <!-- Don't make a source-jar -->
     <source.skip>true</source.skip>
     <license.bundles.dependencies>true</license.bundles.dependencies>
-    <top.dir>${project.basedir}/..</top.dir>
     <shaded.package>org.apache.phoenix.shaded</shaded.package>
   </properties>
 
@@ -117,9 +116,10 @@
                         <exclude>org.eclipse.jetty:*</exclude>
                         <exclude>org.apache.phoenix:phoenix-server</exclude>
                         <exclude>sqlline:sqlline</exclude>
-                        <exclude>log4j:log4j</exclude>
-                        <exclude>org.slf4j:slf4j-api</exclude>
-                        <exclude>org.slf4j:slf4j-log4j12</exclude>
+                        <exclude>log4j:*</exclude>
+                        <exclude>ch.qos.reload4j:*</exclude>
+                        <exclude>org.slf4j:*</exclude>
+                        <exclude>org.apache.logging.log4j:*</exclude>
                     </excludes>
                 </artifactSet>
                 <filters>
@@ -171,15 +171,6 @@
                       <pattern>org.joda</pattern>
                       <shadedPattern>${shaded.package}.org.joda</shadedPattern>
                     </relocation>
-                    <!-- Tephra and dependencies -->
-                    <relocation>
-                      <pattern>co.cask.tephra</pattern>
-                      <shadedPattern>${shaded.package}.co.cask.tephra</shadedPattern>
-                    </relocation>
-                    <relocation>
-                      <pattern>org.apache.tephra</pattern>
-                      <shadedPattern>${shaded.package}.org.apache.tephra</shadedPattern>
-                    </relocation>
                     <relocation>
                         <pattern>org.apache.omid</pattern>
                         <shadedPattern>${shaded.package}.org.apache.omid</shadedPattern>
@@ -191,14 +182,6 @@
                     <relocation>
                         <pattern>org.jboss.netty:netty</pattern>
                         <shadedPattern>${shaded.package}.org.jboss.netty:netty</shadedPattern>
-                    </relocation>
-                    <relocation>
-                      <pattern>org.apache.twill</pattern>
-                      <shadedPattern>${shaded.package}.org.apache.twill</shadedPattern>
-                    </relocation>
-                    <relocation>
-                      <pattern>org.apache.thrift</pattern>
-                      <shadedPattern>${shaded.package}.org.apache.thrift</shadedPattern>
                     </relocation>
 
                     <relocation>
@@ -287,6 +270,11 @@
     <dependency>
       <groupId>org.apache.phoenix</groupId>
       <artifactId>phoenix-core</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.phoenix</groupId>
+      <artifactId>phoenix-hbase-compat-${hbase.compat.version}</artifactId>
+      <optional>false</optional>
     </dependency>
     <!-- hbase's classpath will provide these, mark them as provided to prevent
          them, and their transitive dependencies, from being included in the
@@ -417,6 +405,9 @@
           <value>2.3</value>
         </property>
       </activation>
+      <properties>
+        <hbase.profile>2.3</hbase.profile>
+      </properties>
       <dependencies>
         <dependency>
           <groupId>org.apache.zookeeper</groupId>
@@ -431,9 +422,12 @@
       <activation>
         <property>
           <name>hbase.profile</name>
-          <value>2.4</value>
+          <value>2.4.0</value>
         </property>
       </activation>
+      <properties>
+        <hbase.profile>2.4.0</hbase.profile>
+      </properties>
       <dependencies>
         <dependency>
           <groupId>org.apache.zookeeper</groupId>
@@ -442,8 +436,28 @@
         </dependency>
       </dependencies>
     </profile>
+      <profile>
+        <id>phoenix-hbase-compat-2.4.1</id>
+        <!-- keep dependency plugin happy -->
+        <activation>
+          <property>
+            <name>hbase.profile</name>
+            <value>2.4</value>
+          </property>
+        </activation>
+        <properties>
+          <hbase.profile>2.4.0</hbase.profile>
+        </properties>
+        <dependencies>
+          <dependency>
+            <groupId>org.apache.zookeeper</groupId>
+            <artifactId>zookeeper-jute</artifactId>
+            <scope>provided</scope>
+          </dependency>
+        </dependencies>
+      </profile>
     <profile>
-      <id>phoenix-hbase-compat-2.4.0-default</id>
+      <id>phoenix-hbase-compat-2.4.1-default</id>
       <!-- keep dependency plugin happy -->
       <activation>
         <property>

@@ -33,10 +33,12 @@ import org.apache.phoenix.util.SchemaUtil;
 import org.apache.phoenix.util.TestUtil;
 import org.junit.Before;
 import org.junit.Test;
+import org.junit.experimental.categories.Category;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
 import org.junit.runners.Parameterized.Parameters;
 
+@Category(ParallelStatsEnabledTest.class)
 @RunWith(Parameterized.class)
 public class TransactionalViewIT extends ParallelStatsEnabledIT {
 
@@ -50,8 +52,7 @@ public class TransactionalViewIT extends ParallelStatsEnabledIT {
     
     @Parameters(name="TransactionalViewIT_transactionProvider={0}")
     public static synchronized Collection<Object[]> data() {
-        return TestUtil.filterTxParamData(Arrays.asList(new Object[][] { 
-                 {"TEPHRA"},{"OMID"}}),0);
+        return Arrays.asList(new Object[][] { { "OMID" } });
     }
     
     @Before

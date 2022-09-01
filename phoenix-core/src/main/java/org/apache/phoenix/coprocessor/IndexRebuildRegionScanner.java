@@ -71,8 +71,9 @@ public class IndexRebuildRegionScanner extends GlobalIndexRegionScanner {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(IndexRebuildRegionScanner.class);
     private static boolean ignoreIndexRebuildForTesting  = false;
-
+    private static boolean throwExceptionForRebuild  = false;
     public static void setIgnoreIndexRebuildForTesting(boolean ignore) { ignoreIndexRebuildForTesting = ignore; }
+    public static void setThrowExceptionForRebuild(boolean throwException) { throwExceptionForRebuild = throwException; }
     private int singleRowRebuildReturnCode;
 
 
@@ -145,6 +146,9 @@ public class IndexRebuildRegionScanner extends GlobalIndexRegionScanner {
         if (ignoreIndexRebuildForTesting) {
             return;
         }
+        if (throwExceptionForRebuild) {
+            throw new IOException("Exception for testing. Something happened");
+        }
         updateIndexRows(indexMutationMap, indexRowsToBeDeleted, verificationResult);
     }
 
@@ -154,9 +158,6 @@ public class IndexRebuildRegionScanner extends GlobalIndexRegionScanner {
         Scan indexScan = prepareIndexScan(expectedIndexMutationMap);
         try (ResultScanner resultScanner = indexHTable.getScanner(indexScan)) {
             for (Result result = resultScanner.next(); (result != null); result = resultScanner.next()) {
-                if (!isRawFilterSupported && !expectedIndexMutationMap.containsKey(result.getRow())) {
-                        continue;
-                }
                 ungroupedAggregateRegionObserver.checkForRegionClosingOrSplitting();
                 List<Mutation> mutationList = prepareActualIndexMutations(result);
                 actualIndexMutationMap.put(result.getRow(), mutationList);
@@ -365,6 +366,7 @@ public class IndexRebuildRegionScanner extends GlobalIndexRegionScanner {
         } catch (Throwable e) {
             LOGGER.error("Exception in IndexRebuildRegionScanner for region "
                     + region.getRegionInfo().getRegionNameAsString(), e);
+            this.shouldRetry = true;
             throw e;
         } finally {
             region.closeRegionOperation();

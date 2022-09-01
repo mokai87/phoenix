@@ -49,20 +49,21 @@ import org.apache.hadoop.hbase.coprocessor.SimpleRegionObserver;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.wal.WALEdit;
 
-import org.apache.phoenix.end2end.BaseUniqueNamesOwnClusterIT;
+import org.apache.phoenix.end2end.NeedsOwnMiniClusterTest;
 import org.apache.phoenix.execute.MutationState.MultiRowMutationState;
 import org.apache.phoenix.hbase.index.Indexer;
 import org.apache.phoenix.jdbc.PhoenixConnection;
 import org.apache.phoenix.monitoring.GlobalMetric;
 import org.apache.phoenix.monitoring.MetricType;
+import org.apache.phoenix.query.BaseTest;
 import org.apache.phoenix.query.QueryServices;
 import org.apache.phoenix.schema.TableRef;
 import org.apache.phoenix.util.PhoenixRuntime;
 import org.apache.phoenix.util.ReadOnlyProps;
-import org.apache.phoenix.util.TestUtil;
 import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.Test;
+import org.junit.experimental.categories.Category;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
 import org.junit.runners.Parameterized.Parameters;
@@ -71,9 +72,10 @@ import org.apache.phoenix.thirdparty.com.google.common.base.Preconditions;
 import org.apache.phoenix.thirdparty.com.google.common.collect.Lists;
 import org.apache.phoenix.thirdparty.com.google.common.collect.Maps;
 
+@Category(NeedsOwnMiniClusterTest.class)
 @RunWith(Parameterized.class)
 // Needs to extend BaseUniqueNamesOwnClusterIT due to installation of FailingRegionObserver coprocessor
-public class PartialCommitIT extends BaseUniqueNamesOwnClusterIT {
+public class PartialCommitIT extends BaseTest {
     
 	private final String aSuccessTable;
 	private final String bFailureTable;
@@ -102,10 +104,9 @@ public class PartialCommitIT extends BaseUniqueNamesOwnClusterIT {
     
     @Parameters(name="PartialCommitIT_transactionProvider={0}")
     public static synchronized Collection<Object[]> data() {
-        return TestUtil.filterTxParamData(Arrays.asList(new Object[][] { 
-                 {"TEPHRA"},{"OMID"}}),0);
+        return Arrays.asList(new Object[][] { { "OMID" } });
     }
-    
+
     public PartialCommitIT(String transactionProvider) {
         this.transactionProvider = transactionProvider;
         this.transactional = transactionProvider != null;
@@ -266,7 +267,7 @@ public class PartialCommitIT extends BaseUniqueNamesOwnClusterIT {
     
     private PhoenixConnection getConnectionWithTableOrderPreservingMutationState() throws SQLException {
         try (PhoenixConnection con = DriverManager.getConnection(getUrl()).unwrap(PhoenixConnection.class)) {
-            final Map<TableRef, MultiRowMutationState> mutations = Maps.newTreeMap(new TableRefComparator());
+            final Map<TableRef, List<MultiRowMutationState>> mutations = Maps.newTreeMap(new TableRefComparator());
             // passing a null mutation state forces the connection.newMutationState() to be used to create the MutationState
             return new PhoenixConnection(con, (MutationState)null) {
                 @Override

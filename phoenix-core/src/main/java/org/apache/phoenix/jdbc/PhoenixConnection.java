@@ -19,8 +19,10 @@ package org.apache.phoenix.jdbc;
 
 import static org.apache.phoenix.thirdparty.com.google.common.base.Preconditions.checkNotNull;
 import static java.util.Collections.emptyMap;
+import static org.apache.phoenix.monitoring.GlobalClientMetrics.GLOBAL_OPEN_INTERNAL_PHOENIX_CONNECTIONS;
 import static org.apache.phoenix.monitoring.GlobalClientMetrics.GLOBAL_OPEN_PHOENIX_CONNECTIONS;
 import static org.apache.phoenix.monitoring.GlobalClientMetrics.GLOBAL_PHOENIX_CONNECTIONS_ATTEMPTED_COUNTER;
+import static org.apache.phoenix.monitoring.GlobalClientMetrics.GLOBAL_FAILED_PHOENIX_CONNECTIONS;
 
 import java.io.EOFException;
 import java.io.IOException;
@@ -53,6 +55,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.Executor;
 import java.util.concurrent.LinkedBlockingQueue;
 
@@ -64,6 +67,7 @@ import org.apache.hadoop.hbase.client.Consistency;
 import org.apache.htrace.Sampler;
 import org.apache.htrace.TraceScope;
 import org.apache.phoenix.call.CallRunner;
+import org.apache.phoenix.exception.FailoverSQLException;
 import org.apache.phoenix.exception.SQLExceptionCode;
 import org.apache.phoenix.exception.SQLExceptionInfo;
 import org.apache.phoenix.execute.CommitException;
@@ -77,6 +81,7 @@ import org.apache.phoenix.iterate.TableResultIteratorFactory;
 import org.apache.phoenix.jdbc.PhoenixStatement.PhoenixStatementParser;
 import org.apache.phoenix.log.LogLevel;
 import org.apache.phoenix.monitoring.MetricType;
+import org.apache.phoenix.monitoring.TableMetricsManager;
 import org.apache.phoenix.parse.PFunction;
 import org.apache.phoenix.parse.PSchema;
 import org.apache.phoenix.query.ConnectionQueryServices;
@@ -137,7 +142,7 @@ import org.apache.phoenix.thirdparty.com.google.common.collect.Lists;
  * 
  * @since 0.1
  */
-public class PhoenixConnection implements Connection, MetaDataMutated, SQLCloseable {
+public class PhoenixConnection implements MetaDataMutated, SQLCloseable, PhoenixMonitoredConnection {
     private final String url;
     private String schema;
     private final ConnectionQueryServices services;
@@ -170,11 +175,22 @@ public class PhoenixConnection implements Connection, MetaDataMutated, SQLClosea
     private TableResultIteratorFactory tableResultIteratorFactory;
     private boolean isRunningUpgrade;
     private LogLevel logLevel;
+    private LogLevel auditLogLevel;
     private Double logSamplingRate;
     private String sourceOfOperation;
+    private volatile SQLException reasonForClose;
+    private static final String[] CONNECTION_PROPERTIES;
+
+    private final ConcurrentLinkedQueue<PhoenixConnection> childConnections =
+        new ConcurrentLinkedQueue<>();
+
+    //For now just the copy constructor paths will have this as true as I don't want to change the
+    //public interfaces.
+    private final boolean isInternalConnection;
 
     static {
         Tracing.addTraceMetricsSource();
+        CONNECTION_PROPERTIES = PhoenixRuntime.getConnectionProperties();
     }
 
     private static Properties newPropsWithSCN(long scn, Properties props) {
@@ -189,7 +205,7 @@ public class PhoenixConnection implements Connection, MetaDataMutated, SQLClosea
         this(connection.getQueryServices(), connection.getURL(), connection
                 .getClientInfo(), connection.metaData, connection
                 .getMutationState(), isDescRowKeyOrderUpgrade,
-                isRunningUpgrade, connection.buildingIndex);
+                isRunningUpgrade, connection.buildingIndex, true);
         this.isAutoCommit = connection.isAutoCommit;
         this.isAutoFlush = connection.isAutoFlush;
         this.sampler = connection.sampler;
@@ -206,7 +222,7 @@ public class PhoenixConnection implements Connection, MetaDataMutated, SQLClosea
         this(connection.getQueryServices(), connection.getURL(), connection
                 .getClientInfo(), connection.getMetaDataCache(), mutationState,
                 connection.isDescVarLengthRowKeyUpgrade(), connection
-                .isRunningUpgrade(), connection.buildingIndex);
+                .isRunningUpgrade(), connection.buildingIndex, true);
     }
 
     public PhoenixConnection(PhoenixConnection connection, long scn)
@@ -217,7 +233,7 @@ public class PhoenixConnection implements Connection, MetaDataMutated, SQLClosea
 	public PhoenixConnection(PhoenixConnection connection, Properties props) throws SQLException {
         this(connection.getQueryServices(), connection.getURL(), props, connection.metaData, connection
                 .getMutationState(), connection.isDescVarLengthRowKeyUpgrade(),
-                connection.isRunningUpgrade(), connection.buildingIndex);
+                connection.isRunningUpgrade(), connection.buildingIndex, true);
         this.isAutoCommit = connection.isAutoCommit;
         this.isAutoFlush = connection.isAutoFlush;
         this.sampler = connection.sampler;
@@ -226,7 +242,7 @@ public class PhoenixConnection implements Connection, MetaDataMutated, SQLClosea
 
     public PhoenixConnection(ConnectionQueryServices services, String url,
             Properties info, PMetaData metaData) throws SQLException {
-        this(services, url, info, metaData, null, false, false, false);
+        this(services, url, info, metaData, null, false, false, false, false);
     }
 
     public PhoenixConnection(PhoenixConnection connection,
@@ -234,164 +250,169 @@ public class PhoenixConnection implements Connection, MetaDataMutated, SQLClosea
                     throws SQLException {
         this(services, connection.url, info, connection.metaData, null,
                 connection.isDescVarLengthRowKeyUpgrade(), connection
-                .isRunningUpgrade(), connection.buildingIndex);
+                .isRunningUpgrade(), connection.buildingIndex, true);
     }
 
     private PhoenixConnection(ConnectionQueryServices services, String url,
             Properties info, PMetaData metaData, MutationState mutationState,
             boolean isDescVarLengthRowKeyUpgrade, boolean isRunningUpgrade,
-            boolean buildingIndex) throws SQLException {
-        GLOBAL_PHOENIX_CONNECTIONS_ATTEMPTED_COUNTER.increment();
-        this.url = url;
-        this.isDescVarLengthRowKeyUpgrade = isDescVarLengthRowKeyUpgrade;
+            boolean buildingIndex, boolean isInternalConnection) throws SQLException {
+            this.url = url;
+            this.isDescVarLengthRowKeyUpgrade = isDescVarLengthRowKeyUpgrade;
+            this.isInternalConnection = isInternalConnection;
 
-        // Filter user provided properties based on property policy, if
-        // provided and QueryServices.PROPERTY_POLICY_PROVIDER_ENABLED is true
-        if (Boolean.valueOf(info.getProperty(QueryServices.PROPERTY_POLICY_PROVIDER_ENABLED,
-                String.valueOf(QueryServicesOptions.DEFAULT_PROPERTY_POLICY_PROVIDER_ENABLED)))) {
-            PropertyPolicyProvider.getPropertyPolicy().evaluate(info);
-        }
-
-        // Copy so client cannot change
-        this.info = info == null ? new Properties() : PropertiesUtil
-                .deepCopy(info);
-        final PName tenantId = JDBCUtil.getTenantId(url, info);
-        if (this.info.isEmpty() && tenantId == null) {
-            this.services = services;
-        } else {
-            // Create child services keyed by tenantId to track resource usage
-            // for
-            // a tenantId for all connections on this JVM.
-            if (tenantId != null) {
-                services = services.getChildQueryServices(tenantId
-                        .getBytesPtr());
+            // Filter user provided properties based on property policy, if
+            // provided and QueryServices.PROPERTY_POLICY_PROVIDER_ENABLED is true
+            if (Boolean.valueOf(info.getProperty(QueryServices.PROPERTY_POLICY_PROVIDER_ENABLED,
+                    String.valueOf(QueryServicesOptions.DEFAULT_PROPERTY_POLICY_PROVIDER_ENABLED)))) {
+                PropertyPolicyProvider.getPropertyPolicy().evaluate(info);
             }
-            ReadOnlyProps currentProps = services.getProps();
-            final ReadOnlyProps augmentedProps = currentProps
-                    .addAll(filterKnownNonProperties(this.info));
-            this.services = augmentedProps == currentProps ? services
-                    : new DelegateConnectionQueryServices(services) {
+
+            // Copy so client cannot change
+            this.info = PropertiesUtil.deepCopy(info);
+            final PName tenantId = JDBCUtil.getTenantId(url, info);
+            if (this.info.isEmpty() && tenantId == null) {
+                this.services = services;
+            } else {
+                // Create child services keyed by tenantId to track resource usage
+                // for
+                // a tenantId for all connections on this JVM.
+                if (tenantId != null) {
+                    services = services.getChildQueryServices(tenantId
+                            .getBytesPtr());
+                }
+                ReadOnlyProps currentProps = services.getProps();
+                final ReadOnlyProps augmentedProps = currentProps
+                        .addAll(filterKnownNonProperties(this.info));
+                this.services = augmentedProps == currentProps ? services
+                        : new DelegateConnectionQueryServices(services) {
+                    @Override
+                    public ReadOnlyProps getProps() {
+                        return augmentedProps;
+                    }
+                };
+            }
+
+            Long scnParam = JDBCUtil.getCurrentSCN(url, this.info);
+            checkScn(scnParam);
+            Long buildIndexAtParam = JDBCUtil.getBuildIndexSCN(url, this.info);
+            checkBuildIndexAt(buildIndexAtParam);
+            checkScnAndBuildIndexAtEquality(scnParam, buildIndexAtParam);
+
+            this.scn = scnParam != null ? scnParam : buildIndexAtParam;
+            this.buildingIndex = buildingIndex || buildIndexAtParam != null;
+            this.isAutoFlush = this.services.getProps().getBoolean(
+                    QueryServices.TRANSACTIONS_ENABLED,
+                    QueryServicesOptions.DEFAULT_TRANSACTIONS_ENABLED)
+                    && this.services.getProps().getBoolean(
+                    QueryServices.AUTO_FLUSH_ATTRIB,
+                    QueryServicesOptions.DEFAULT_AUTO_FLUSH);
+            this.isAutoCommit = JDBCUtil.getAutoCommit(
+                    url,
+                    this.info,
+                    this.services.getProps().getBoolean(
+                            QueryServices.AUTO_COMMIT_ATTRIB,
+                            QueryServicesOptions.DEFAULT_AUTO_COMMIT));
+            this.consistency = JDBCUtil.getConsistencyLevel(
+                    url,
+                    this.info,
+                    this.services.getProps().get(QueryServices.CONSISTENCY_ATTRIB,
+                            QueryServicesOptions.DEFAULT_CONSISTENCY_LEVEL));
+            // currently we are not resolving schema set through property, so if
+            // schema doesn't exists ,connection will not fail
+            // but queries may fail
+            this.schema = JDBCUtil.getSchema(
+                    url,
+                    this.info,
+                    this.services.getProps().get(QueryServices.SCHEMA_ATTRIB,
+                            QueryServicesOptions.DEFAULT_SCHEMA));
+            this.tenantId = tenantId;
+            this.mutateBatchSize = JDBCUtil.getMutateBatchSize(url, this.info,
+                    this.services.getProps());
+            this.mutateBatchSizeBytes = JDBCUtil.getMutateBatchSizeBytes(url,
+                    this.info, this.services.getProps());
+            datePattern = this.services.getProps().get(
+                    QueryServices.DATE_FORMAT_ATTRIB, DateUtil.DEFAULT_DATE_FORMAT);
+            timePattern = this.services.getProps().get(
+                    QueryServices.TIME_FORMAT_ATTRIB, DateUtil.DEFAULT_TIME_FORMAT);
+            timestampPattern = this.services.getProps().get(
+                    QueryServices.TIMESTAMP_FORMAT_ATTRIB,
+                    DateUtil.DEFAULT_TIMESTAMP_FORMAT);
+            String numberPattern = this.services.getProps().get(
+                    QueryServices.NUMBER_FORMAT_ATTRIB,
+                    NumberUtil.DEFAULT_NUMBER_FORMAT);
+            int maxSize = this.services.getProps().getInt(
+                    QueryServices.MAX_MUTATION_SIZE_ATTRIB,
+                    QueryServicesOptions.DEFAULT_MAX_MUTATION_SIZE);
+            long maxSizeBytes = this.services.getProps().getLongBytes(
+                    QueryServices.MAX_MUTATION_SIZE_BYTES_ATTRIB,
+                    QueryServicesOptions.DEFAULT_MAX_MUTATION_SIZE_BYTES);
+            String timeZoneID = this.services.getProps().get(QueryServices.DATE_FORMAT_TIMEZONE_ATTRIB,
+                    DateUtil.DEFAULT_TIME_ZONE_ID);
+            Format dateFormat = DateUtil.getDateFormatter(datePattern, timeZoneID);
+            Format timeFormat = DateUtil.getDateFormatter(timePattern, timeZoneID);
+            Format timestampFormat = DateUtil.getDateFormatter(timestampPattern, timeZoneID);
+            formatters.put(PDate.INSTANCE, dateFormat);
+            formatters.put(PTime.INSTANCE, timeFormat);
+            formatters.put(PTimestamp.INSTANCE, timestampFormat);
+            formatters.put(PUnsignedDate.INSTANCE, dateFormat);
+            formatters.put(PUnsignedTime.INSTANCE, timeFormat);
+            formatters.put(PUnsignedTimestamp.INSTANCE, timestampFormat);
+            formatters.put(PDecimal.INSTANCE,
+                    FunctionArgumentType.NUMERIC.getFormatter(numberPattern));
+            formatters.put(PVarbinary.INSTANCE, VarBinaryFormatter.INSTANCE);
+            // We do not limit the metaData on a connection less than the global
+            // one,
+            // as there's not much that will be cached here.
+            Pruner pruner = new Pruner() {
+
                 @Override
-                public ReadOnlyProps getProps() {
-                    return augmentedProps;
+                public boolean prune(PTable table) {
+                    long maxTimestamp = scn == null ? HConstants.LATEST_TIMESTAMP
+                            : scn;
+                    return (table.getType() != PTableType.SYSTEM && (table
+                            .getTimeStamp() >= maxTimestamp || (table.getTenantId() != null && !Objects
+                            .equal(tenantId, table.getTenantId()))));
+                }
+
+                @Override
+                public boolean prune(PFunction function) {
+                    long maxTimestamp = scn == null ? HConstants.LATEST_TIMESTAMP
+                            : scn;
+                    return (function.getTimeStamp() >= maxTimestamp || (function
+                            .getTenantId() != null && !Objects.equal(tenantId,
+                            function.getTenantId())));
                 }
             };
-        }
+            this.logLevel = LogLevel.valueOf(this.services.getProps().get(QueryServices.LOG_LEVEL,
+                    QueryServicesOptions.DEFAULT_LOGGING_LEVEL));
+            this.auditLogLevel = LogLevel.valueOf(this.services.getProps().get(QueryServices.AUDIT_LOG_LEVEL,
+                    QueryServicesOptions.DEFAULT_AUDIT_LOGGING_LEVEL));
+            this.isRequestLevelMetricsEnabled = JDBCUtil.isCollectingRequestLevelMetricsEnabled(url, info,
+                    this.services.getProps());
+            this.mutationState = mutationState == null ? newMutationState(maxSize,
+                    maxSizeBytes) : new MutationState(mutationState, this);
+            this.metaData = metaData;
+            this.metaData.pruneTables(pruner);
+            this.metaData.pruneFunctions(pruner);
+            this.services.addConnection(this);
 
-        Long scnParam = JDBCUtil.getCurrentSCN(url, this.info);
-        checkScn(scnParam);
-        Long buildIndexAtParam = JDBCUtil.getBuildIndexSCN(url, this.info);
-        checkBuildIndexAt(buildIndexAtParam);
-        checkScnAndBuildIndexAtEquality(scnParam, buildIndexAtParam);
+            // setup tracing, if its enabled
+            this.sampler = Tracing.getConfiguredSampler(this);
+            this.customTracingAnnotations = getImmutableCustomTracingAnnotations();
+            this.scannerQueue = new LinkedBlockingQueue<>();
+            this.tableResultIteratorFactory = new DefaultTableResultIteratorFactory();
+            this.isRunningUpgrade = isRunningUpgrade;
 
-        this.scn = scnParam != null ? scnParam : buildIndexAtParam;
-        this.buildingIndex = buildingIndex || buildIndexAtParam != null;
-        this.isAutoFlush = this.services.getProps().getBoolean(
-                QueryServices.TRANSACTIONS_ENABLED,
-                QueryServicesOptions.DEFAULT_TRANSACTIONS_ENABLED)
-                && this.services.getProps().getBoolean(
-                        QueryServices.AUTO_FLUSH_ATTRIB,
-                        QueryServicesOptions.DEFAULT_AUTO_FLUSH);
-        this.isAutoCommit = JDBCUtil.getAutoCommit(
-                url,
-                this.info,
-                this.services.getProps().getBoolean(
-                        QueryServices.AUTO_COMMIT_ATTRIB,
-                        QueryServicesOptions.DEFAULT_AUTO_COMMIT));
-        this.consistency = JDBCUtil.getConsistencyLevel(
-                url,
-                this.info,
-                this.services.getProps().get(QueryServices.CONSISTENCY_ATTRIB,
-                        QueryServicesOptions.DEFAULT_CONSISTENCY_LEVEL));
-        // currently we are not resolving schema set through property, so if
-        // schema doesn't exists ,connection will not fail
-        // but queries may fail
-        this.schema = JDBCUtil.getSchema(
-                url,
-                this.info,
-                this.services.getProps().get(QueryServices.SCHEMA_ATTRIB,
-                        QueryServicesOptions.DEFAULT_SCHEMA));
-        this.tenantId = tenantId;
-        this.mutateBatchSize = JDBCUtil.getMutateBatchSize(url, this.info,
-                this.services.getProps());
-        this.mutateBatchSizeBytes = JDBCUtil.getMutateBatchSizeBytes(url,
-                this.info, this.services.getProps());
-        datePattern = this.services.getProps().get(
-                QueryServices.DATE_FORMAT_ATTRIB, DateUtil.DEFAULT_DATE_FORMAT);
-        timePattern = this.services.getProps().get(
-                QueryServices.TIME_FORMAT_ATTRIB, DateUtil.DEFAULT_TIME_FORMAT);
-        timestampPattern = this.services.getProps().get(
-                QueryServices.TIMESTAMP_FORMAT_ATTRIB,
-                DateUtil.DEFAULT_TIMESTAMP_FORMAT);
-        String numberPattern = this.services.getProps().get(
-                QueryServices.NUMBER_FORMAT_ATTRIB,
-                NumberUtil.DEFAULT_NUMBER_FORMAT);
-        int maxSize = this.services.getProps().getInt(
-                QueryServices.MAX_MUTATION_SIZE_ATTRIB,
-                QueryServicesOptions.DEFAULT_MAX_MUTATION_SIZE);
-        long maxSizeBytes = this.services.getProps().getLong(
-                QueryServices.MAX_MUTATION_SIZE_BYTES_ATTRIB,
-                QueryServicesOptions.DEFAULT_MAX_MUTATION_SIZE_BYTES);
-        String timeZoneID = this.services.getProps().get(QueryServices.DATE_FORMAT_TIMEZONE_ATTRIB,
-                DateUtil.DEFAULT_TIME_ZONE_ID);
-        Format dateFormat = DateUtil.getDateFormatter(datePattern, timeZoneID);
-        Format timeFormat = DateUtil.getDateFormatter(timePattern, timeZoneID);
-        Format timestampFormat = DateUtil.getDateFormatter(timestampPattern, timeZoneID);
-        formatters.put(PDate.INSTANCE, dateFormat);
-        formatters.put(PTime.INSTANCE, timeFormat);
-        formatters.put(PTimestamp.INSTANCE, timestampFormat);
-        formatters.put(PUnsignedDate.INSTANCE, dateFormat);
-        formatters.put(PUnsignedTime.INSTANCE, timeFormat);
-        formatters.put(PUnsignedTimestamp.INSTANCE, timestampFormat);
-        formatters.put(PDecimal.INSTANCE,
-                FunctionArgumentType.NUMERIC.getFormatter(numberPattern));
-        formatters.put(PVarbinary.INSTANCE, VarBinaryFormatter.INSTANCE);
-        // We do not limit the metaData on a connection less than the global
-        // one,
-        // as there's not much that will be cached here.
-        Pruner pruner = new Pruner() {
-
-            @Override
-            public boolean prune(PTable table) {
-                long maxTimestamp = scn == null ? HConstants.LATEST_TIMESTAMP
-                        : scn;
-                return (table.getType() != PTableType.SYSTEM && (table
-                        .getTimeStamp() >= maxTimestamp || (table.getTenantId() != null && !Objects
-                        .equal(tenantId, table.getTenantId()))));
+            this.logSamplingRate = Double.parseDouble(this.services.getProps().get(QueryServices.LOG_SAMPLE_RATE,
+                    QueryServicesOptions.DEFAULT_LOG_SAMPLE_RATE));
+            if (isInternalConnection) {
+                GLOBAL_OPEN_INTERNAL_PHOENIX_CONNECTIONS.increment();
+            } else {
+                GLOBAL_OPEN_PHOENIX_CONNECTIONS.increment();
             }
-
-            @Override
-            public boolean prune(PFunction function) {
-                long maxTimestamp = scn == null ? HConstants.LATEST_TIMESTAMP
-                        : scn;
-                return (function.getTimeStamp() >= maxTimestamp || (function
-                        .getTenantId() != null && !Objects.equal(tenantId,
-                                function.getTenantId())));
-            }
-        };
-        this.logLevel= LogLevel.valueOf(this.services.getProps().get(QueryServices.LOG_LEVEL,
-                QueryServicesOptions.DEFAULT_LOGGING_LEVEL));
-        this.isRequestLevelMetricsEnabled = JDBCUtil.isCollectingRequestLevelMetricsEnabled(url, info,
-                this.services.getProps());
-        this.mutationState = mutationState == null ? newMutationState(maxSize,
-                maxSizeBytes) : new MutationState(mutationState, this);
-        this.metaData = metaData;
-        this.metaData.pruneTables(pruner);
-        this.metaData.pruneFunctions(pruner);
-        this.services.addConnection(this);
-
-        // setup tracing, if its enabled
-        this.sampler = Tracing.getConfiguredSampler(this);
-        this.customTracingAnnotations = getImmutableCustomTracingAnnotations();
-        this.scannerQueue = new LinkedBlockingQueue<>();
-        this.tableResultIteratorFactory = new DefaultTableResultIteratorFactory();
-        this.isRunningUpgrade = isRunningUpgrade;
-        
-        this.logSamplingRate = Double.parseDouble(this.services.getProps().get(QueryServices.LOG_SAMPLE_RATE,
-                QueryServicesOptions.DEFAULT_LOG_SAMPLE_RATE));
-        this.sourceOfOperation =
-                this.services.getProps().get(QueryServices.SOURCE_OPERATION_ATTRIB, null);
-        GLOBAL_OPEN_PHOENIX_CONNECTIONS.increment();
+            this.sourceOfOperation =
+                    this.services.getProps().get(QueryServices.SOURCE_OPERATION_ATTRIB, null);
     }
 
     private static void checkScn(Long scnParam) throws SQLException {
@@ -420,7 +441,7 @@ public class PhoenixConnection implements Connection, MetaDataMutated, SQLClosea
 
     private static Properties filterKnownNonProperties(Properties info) {
         Properties prunedProperties = info;
-        for (String property : PhoenixRuntime.CONNECTION_PROPERTIES) {
+        for (String property : CONNECTION_PROPERTIES) {
             if (info.containsKey(property)) {
                 if (prunedProperties == info) {
                     prunedProperties = PropertiesUtil.deepCopy(info);
@@ -442,6 +463,38 @@ public class PhoenixConnection implements Connection, MetaDataMutated, SQLClosea
                     .getString());
         }
         return result.build();
+    }
+
+    public boolean isInternalConnection() {
+        return isInternalConnection;
+    }
+
+    /**
+     * Add connection to the internal childConnections queue
+     * This method is thread safe
+     * @param connection
+     */
+    public void addChildConnection(PhoenixConnection connection) {
+        childConnections.add(connection);
+    }
+
+    /**
+     * Method to remove child connection from childConnections Queue
+     *
+     * @param connection
+     */
+    public void removeChildConnection(PhoenixConnection connection) {
+        childConnections.remove(connection);
+    }
+
+    /**
+     * Method to fetch child connections count from childConnections Queue
+     *
+     * @return int count
+     */
+    @VisibleForTesting
+    public int getChildConnectionsCount() {
+        return childConnections.size();
     }
 
     public Sampler<?> getSampler() {
@@ -585,7 +638,12 @@ public class PhoenixConnection implements Connection, MetaDataMutated, SQLClosea
     }
 
     public PTable getTable(PTableKey key) throws TableNotFoundException {
-        return metaData.getTableRef(key).getTable();
+        PTable table =  metaData.getTableRef(key).getTable();
+        // Force TableNotFoundException for the table that is going through transform
+        if (table.getTransformingNewTable() != null) {
+            throw new TableNotFoundException("Re-read the transforming table", true);
+        }
+        return table;
     }
 
     public PTableRef getTableRef(PTableKey key) throws TableNotFoundException {
@@ -638,33 +696,70 @@ public class PhoenixConnection implements Connection, MetaDataMutated, SQLClosea
         }
     }
 
-    private void checkOpen() throws SQLException {
+    void checkOpen() throws SQLException {
         if (isClosed) {
-            throw new SQLExceptionInfo.Builder(
-                    SQLExceptionCode.CONNECTION_CLOSED).build()
-                    .buildException();
+            throw reasonForClose != null
+                ? reasonForClose
+                : new SQLExceptionInfo.Builder(SQLExceptionCode.CONNECTION_CLOSED)
+                    .build()
+        
+            .buildException();
         }
     }
 
-    @Override
-    public void close() throws SQLException {
+    /**
+     * Close the Phoenix connection and also store the reason for it getting closed.
+     *
+     * @param reasonForClose The reason for closing the phoenix connection to be set as state
+     *                        in phoenix connection.
+     * @throws SQLException if error happens when closing.
+     * @see #close()
+     */
+    public void close(SQLException reasonForClose) throws SQLException {
         if (isClosed) {
             return;
         }
+        this.reasonForClose = reasonForClose;
+        close();
+    }
+
+    // A connection can be closed by calling thread, or by the high availability (HA) framework.
+    // Making this logic synchronized will enforce a connection is closed only once.
+    //Does this need to be synchronized?
+    @Override
+    synchronized public void close() throws SQLException {
+        if (isClosed) {
+            return;
+        }
+
         try {
-            clearMetrics();
+            TableMetricsManager.pushMetricsFromConnInstanceMethod(getMutationMetrics());
+            if(!(reasonForClose instanceof FailoverSQLException)) {
+                // If the reason for close is because of failover, the metrics will be kept for
+                // consolidation by the wrapper PhoenixFailoverConnection object.
+                clearMetrics();
+            }
             try {
                 if (traceScope != null) {
                     traceScope.close();
                 }
                 closeStatements();
+                if (childConnections != null) {
+                    SQLCloseables.closeAllQuietly(childConnections);
+                }
+
+
             } finally {
                 services.removeConnection(this);
             }
             
         } finally {
             isClosed = true;
-            GLOBAL_OPEN_PHOENIX_CONNECTIONS.decrement();
+            if(isInternalConnection()){
+                GLOBAL_OPEN_INTERNAL_PHOENIX_CONNECTIONS.decrement();
+            } else {
+                GLOBAL_OPEN_PHOENIX_CONNECTIONS.decrement();
+            }
         }
     }
 
@@ -674,7 +769,11 @@ public class PhoenixConnection implements Connection, MetaDataMutated, SQLClosea
             @Override
             public Void call() throws SQLException {
                 checkOpen();
-                mutationState.commit();
+                try {
+                    mutationState.commit();
+                } finally {
+                    mutationState.resetExecuteMutationTimeMap();
+                }
                 return null;
             }
         }, Tracing.withTracing(this, "committing mutations"));
@@ -1290,6 +1389,10 @@ public class PhoenixConnection implements Connection, MetaDataMutated, SQLClosea
 
     public LogLevel getLogLevel(){
         return this.logLevel;
+    }
+
+    public LogLevel getAuditLogLevel(){
+        return this.auditLogLevel;
     }
     
     public Double getLogSamplingRate(){

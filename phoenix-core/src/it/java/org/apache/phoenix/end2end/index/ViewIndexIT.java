@@ -54,7 +54,9 @@ import org.apache.hadoop.hbase.client.Admin;
 import org.apache.hadoop.hbase.client.TableDescriptor;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.phoenix.compile.QueryPlan;
+import org.apache.phoenix.end2end.CreateTableIT;
 import org.apache.phoenix.end2end.IndexToolIT;
+import org.apache.phoenix.end2end.NeedsOwnMiniClusterTest;
 import org.apache.phoenix.end2end.SplitSystemCatalogIT;
 import org.apache.phoenix.hbase.index.IndexRegionObserver;
 import org.apache.phoenix.hbase.index.Indexer;
@@ -76,10 +78,12 @@ import org.apache.phoenix.util.TestUtil;
 import org.junit.Assert;
 import org.junit.Ignore;
 import org.junit.Test;
+import org.junit.experimental.categories.Category;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
 import org.junit.runners.Parameterized.Parameters;
 
+@Category(NeedsOwnMiniClusterTest.class)
 @RunWith(Parameterized.class)
 public class ViewIndexIT extends SplitSystemCatalogIT {
     private boolean isNamespaceMapped;
@@ -239,6 +243,7 @@ public class ViewIndexIT extends SplitSystemCatalogIT {
             ResultSet rs = conn1.prepareStatement("EXPLAIN " + sql).executeQuery();
             assertEquals(
                 "CLIENT PARALLEL 1-WAY RANGE SCAN OVER " + SchemaUtil.getPhysicalTableName(Bytes.toBytes(fullTableName), isNamespaceMapped) + " [1,'10',100]\n" +
+                    "    SERVER MERGE [0.V1]\n" +
                     "    SERVER FILTER BY FIRST KEY ONLY\n" +
                     "CLIENT MERGE SORT", QueryUtil.getExplainPlan(rs));
             rs = conn1.prepareStatement(sql).executeQuery();
@@ -356,7 +361,7 @@ public class ViewIndexIT extends SplitSystemCatalogIT {
             }
 
             // run the MR job
-            IndexToolIT.runIndexTool(true, false, SCHEMA2, globalViewName, globalViewIdx);
+            IndexToolIT.runIndexTool(false, SCHEMA2, globalViewName, globalViewIdx);
             try (Connection tenantConn = DriverManager.getConnection(getUrl(), tenantProps)) {
                 // Verify that query uses the global view index works while querying the tenant view
                 PreparedStatement stmt = tenantConn.prepareStatement("SELECT KV1 FROM  " + tenantView + " WHERE PK3 = ? AND KV3 = ?");
@@ -410,6 +415,7 @@ public class ViewIndexIT extends SplitSystemCatalogIT {
         Long int1= 1792L;
         String text2 ="text2";
         BigDecimal double1 = BigDecimal.valueOf(254.564);
+        IndexRegionObserver.setFailPostIndexUpdatesForTesting(true);
         try (Connection conn = DriverManager.getConnection(getUrl())) {
             // View fixed, index variable
             createTableForRowKeyTestsAndVerify(conn, "DATE_TIME1, INT1", "TEXT1", "INT1", int1);
@@ -438,18 +444,22 @@ public class ViewIndexIT extends SplitSystemCatalogIT {
             createTableForRowKeyTestsAndVerify(conn, "DATE_TIME1, INT1", "TEXT1 DESC", "INT1", int1);
             createTableForRowKeyTestsAndVerify(conn, "DATE_TIME1, INT1 DESC", "TEXT1 DESC", "INT1", int1);
             createTableForRowKeyTestsAndVerify(conn, "DATE_TIME1, INT1 DESC", "TEXT1", "INT1", int1);
+
             createTableForRowKeyTestsAndVerify(conn,"DATE_TIME1, TEXT3 DESC, INT1 DESC, TEXT2, TEXT4 DESC", "TEXT1, DOUBLE1 DESC", "TEXT2", text2);
+
             createTableForRowKeyTestsAndVerify(conn,"DATE_TIME1, TEXT3 DESC, INT1 DESC, TEXT2 DESC, TEXT4 DESC", "TEXT1 DESC, DOUBLE1 DESC", "TEXT2",text2);
             createTableForRowKeyTestsAndVerify(conn, "DATE_TIME1 DESC, TEXT3 DESC, INT1, DOUBLE1 DESC", "TEXT1", "DOUBLE1", double1);
 
             // Both index and data end with var length
             createTableForRowKeyTestsAndVerify(conn,"DATE_TIME1 DESC, TEXT3 DESC, INT1, TEXT4, EMAIL1", "TEXT1", "INT1", int1);
             createTableForRowKeyTestsAndVerify(conn,"DATE_TIME1 DESC, TEXT3, INT1, EMAIL1", "TEXT1, TEXT4", "INT1", int1);
+        } finally {
+            IndexRegionObserver.setFailPostIndexUpdatesForTesting(false);
         }
     }
 
     private void createTableForRowKeyTestsAndVerify(Connection conn, String viewPkColumns, String indexPKColumns, String lastViewPKCol, Object lastColExpectedVal)
-            throws SQLException {
+            throws Exception {
         final String fullTableName = "TBL_"+generateUniqueName();
         final String fullViewName = "VW_" + generateUniqueName();
         final String fullIndexName = "IDX_" + generateUniqueName();
@@ -801,6 +811,30 @@ public class ViewIndexIT extends SplitSystemCatalogIT {
             } else {
                 fail();
             }
+        }
+    }
+
+    @Test
+    public void testCreateViewSchemaVersion() throws Exception {
+        Properties props = new Properties();
+        final String schemaName = generateUniqueName();
+        final String tableName = generateUniqueName();
+        final String viewName = generateUniqueName();
+        final String viewIndexName = generateUniqueName();
+        final String dataTableFullName = SchemaUtil.getTableName(schemaName, tableName);
+        final String viewFullName = SchemaUtil.getTableName(schemaName, viewName);
+        final String viewIndexFullName = SchemaUtil.getTableName(schemaName, viewIndexName);
+        try (Connection conn = DriverManager.getConnection(getUrl(), props)) {
+            String version = "V1.0";
+            CreateTableIT.testCreateTableSchemaVersionAndTopicNameHelper(conn, schemaName, tableName, version, null);
+            String createViewSql = "CREATE VIEW " + viewFullName + " AS SELECT * FROM " + dataTableFullName +
+                    " SCHEMA_VERSION='" + version + "'";
+            conn.createStatement().execute(createViewSql);
+            String createViewIndexSql = "CREATE INDEX " + viewIndexName + " ON "
+                    + viewFullName + " (ID2) INCLUDE (ID1) SCHEMA_VERSION='" + version + "'";
+            conn.createStatement().execute(createViewIndexSql);
+            PTable viewIndex = PhoenixRuntime.getTableNoCache(conn, viewIndexFullName);
+            assertEquals(version, viewIndex.getSchemaVersion());
         }
     }
 

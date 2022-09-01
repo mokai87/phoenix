@@ -29,6 +29,8 @@ import java.util.Map;
 import java.util.NoSuchElementException;
 import java.util.Set;
 
+import org.apache.phoenix.expression.DelegateExpression;
+import org.apache.phoenix.schema.ValueSchema;
 import org.apache.phoenix.thirdparty.com.google.common.base.Optional;
 import org.apache.hadoop.hbase.filter.CompareFilter.CompareOp;
 import org.apache.hadoop.hbase.io.ImmutableBytesWritable;
@@ -226,12 +228,17 @@ public class WhereOptimizer {
             boolean stopExtracting = false;
             // Iterate through all spans of this slot
             boolean areAllSingleKey = KeyRange.areAllSingleKey(keyRanges);
+            boolean isInList = false;
+            if (keyPart.getExtractNodes() != null && keyPart.getExtractNodes().size() > 0
+                    && keyPart.getExtractNodes().get(0) instanceof InListExpression){
+                isInList = true;
+            }
             while (true) {
                 SortOrder sortOrder =
                         schema.getField(slot.getPKPosition() + slotOffset).getSortOrder();
                 if (prevSortOrder == null)  {
                     prevSortOrder = sortOrder;
-                } else if (prevSortOrder != sortOrder) {
+                } else if (prevSortOrder != sortOrder || (prevSortOrder == SortOrder.DESC && isInList)) {
                     //Consider the Universe of keys to be [0,7]+ on the leading column A
                     // and [0,7]+ on trailing column B, with a padbyte of 0 for ASC and 7 for DESC
                     //if our key range for ASC keys is leading [2,*] and trailing [3,*],
@@ -295,7 +302,7 @@ public class WhereOptimizer {
             } else {
                 if (schema.getField(
                        slot.getPKPosition() + slotOffset - 1).getSortOrder() == SortOrder.DESC) {
-                    keyRanges = invertKeyRanges(keyRanges);
+                   keyRanges = invertKeyRanges(keyRanges);
                 }
                 pkPos = slot.getPKPosition() + slotOffset;
                 slotSpanArray[cnf.size()] = clipLeftSpan-1;
@@ -361,8 +368,10 @@ public class WhereOptimizer {
         }
     }
     
-    private static KeyRange getTrailingRange(RowKeySchema rowKeySchema, int pkPos, KeyRange range, KeyRange clippedResult, ImmutableBytesWritable ptr) {
-        int separatorLength = rowKeySchema.getField(pkPos).getDataType().isFixedWidth() ? 0 : 1;
+    private static KeyRange getTrailingRange(RowKeySchema rowKeySchema, int clippedPkPos, KeyRange range, KeyRange clippedResult, ImmutableBytesWritable ptr) {
+        // We are interested in the clipped part's Seperator. Since we combined first part, we need to
+        // remove its separator from the trailing parts' start
+        int clippedSepLength= rowKeySchema.getField(clippedPkPos).getDataType().isFixedWidth() ? 0 : 1;
         byte[] lowerRange = KeyRange.UNBOUND;
         boolean lowerInclusive = false;
         // Lower range of trailing part of RVC must be true, so we can form a new range to intersect going forward
@@ -370,7 +379,7 @@ public class WhereOptimizer {
                 && range.getLowerRange().length > clippedResult.getLowerRange().length
                 && Bytes.startsWith(range.getLowerRange(), clippedResult.getLowerRange())) {
             lowerRange = range.getLowerRange();
-            int offset = clippedResult.getLowerRange().length + separatorLength;
+            int offset = clippedResult.getLowerRange().length + clippedSepLength;
             ptr.set(lowerRange, offset, lowerRange.length - offset);
             lowerRange = ptr.copyBytes();
             lowerInclusive = range.isLowerInclusive();
@@ -381,7 +390,7 @@ public class WhereOptimizer {
                 && range.getUpperRange().length > clippedResult.getUpperRange().length
                 && Bytes.startsWith(range.getUpperRange(), clippedResult.getUpperRange())) {
             upperRange = range.getUpperRange();
-            int offset = clippedResult.getUpperRange().length + separatorLength;
+            int offset = clippedResult.getUpperRange().length + clippedSepLength;
             ptr.set(upperRange, offset, upperRange.length - offset);
             upperRange = ptr.copyBytes();
             upperInclusive = range.isUpperInclusive();
@@ -1307,7 +1316,7 @@ public class WhereOptimizer {
                 // code doesn't work correctly for WhereOptimizerTest.testMultiSlotTrailingIntersect()
                 if (result.isSingleKey() && !(range.isSingleKey() && otherRange.isSingleKey())) {
                     int trailingPkPos = pkPos + Math.min(minSpan, otherMinSpan);
-                    KeyRange trailingRange = getTrailingRange(rowKeySchema, trailingPkPos, minSpan > otherMinSpan ? range : otherRange, result, ptr);
+                    KeyRange trailingRange = getTrailingRange(rowKeySchema, pkPos, minSpan > otherMinSpan ? range : otherRange, result, ptr);
                     trailingRanges[trailingPkPos] = trailingRanges[trailingPkPos].intersect(trailingRange);
                 } else {
                     // Add back clipped part of range 
@@ -1809,7 +1818,7 @@ public class WhereOptimizer {
         /**
          * 
          * Implementation of KeySlots for AND and OR expressions. The
-         * List<KeySlot> will be in PK order.
+         * {@code List<KeySlot> } will be in PK order.
          *
          */
         public static class MultiKeySlot implements KeySlots {
@@ -2194,10 +2203,11 @@ public class WhereOptimizer {
                     // for the non-equality cases return actual sort order
                     //This work around should work
                     // but a more general approach can be taken.
-                    if(rvcElementOp == CompareOp.EQUAL ||
-                            rvcElementOp == CompareOp.NOT_EQUAL){
-                        return SortOrder.ASC;
-                    }
+                    //This optimization causes PHOENIX-6662 (when desc pk used with in clause)
+//                    if(rvcElementOp == CompareOp.EQUAL ||
+//                            rvcElementOp == CompareOp.NOT_EQUAL){
+//                        return SortOrder.ASC;
+//                    }
                     return childPart.getColumn().getSortOrder();
                 }
 

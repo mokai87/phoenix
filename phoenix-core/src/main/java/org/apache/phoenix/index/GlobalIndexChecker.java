@@ -17,8 +17,9 @@
  */
 package org.apache.phoenix.index;
 
-import static org.apache.phoenix.hbase.index.IndexRegionObserver.VERIFIED_BYTES;
 import static org.apache.phoenix.index.IndexMaintainer.getIndexMaintainer;
+import static org.apache.phoenix.query.QueryConstants.UNVERIFIED_BYTES;
+import static org.apache.phoenix.query.QueryConstants.VERIFIED_BYTES;
 import static org.apache.phoenix.schema.types.PDataType.TRUE_BYTES;
 import static org.apache.phoenix.util.ScanUtil.getDummyResult;
 import static org.apache.phoenix.util.ScanUtil.getPageSizeMsForRegionScanner;
@@ -28,6 +29,7 @@ import java.io.IOException;
 import java.sql.SQLException;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Random;
 import java.util.Optional;
 
 import org.apache.hadoop.hbase.Cell;
@@ -63,6 +65,7 @@ import org.apache.phoenix.hbase.index.metrics.MetricsIndexerSourceFactory;
 import org.apache.phoenix.query.QueryServices;
 import org.apache.phoenix.query.QueryServicesOptions;
 import org.apache.phoenix.schema.SortOrder;
+import org.apache.phoenix.schema.transform.TransformMaintainer;
 import org.apache.phoenix.schema.types.PLong;
 import org.apache.phoenix.util.EnvironmentEdgeManager;
 import org.apache.phoenix.util.IndexUtil;
@@ -96,6 +99,9 @@ import org.slf4j.LoggerFactory;
 public class GlobalIndexChecker extends BaseScannerRegionObserver implements RegionCoprocessor{
     private static final Logger LOG =
         LoggerFactory.getLogger(GlobalIndexChecker.class);
+    private static final String REPAIR_LOGGING_PERCENT_ATTRIB = "phoenix.index.repair.logging.percent";
+    private static final double DEFAULT_REPAIR_LOGGING_PERCENT = 1;
+
     private GlobalIndexCheckerSource metricsSource;
     private CoprocessorEnvironment env;
 
@@ -119,7 +125,7 @@ public class GlobalIndexChecker extends BaseScannerRegionObserver implements Reg
      * An instance of this class is created for each scanner on an index
      * and used to verify individual rows and rebuild them if they are not valid
      */
-    private class GlobalIndexScanner extends BaseRegionScanner {
+    public class GlobalIndexScanner extends BaseRegionScanner {
         private RegionScanner scanner;
         private long ageThreshold;
         private Scan scan;
@@ -140,6 +146,8 @@ public class GlobalIndexChecker extends BaseScannerRegionObserver implements Reg
         private long pageSize = Long.MAX_VALUE;
         private boolean restartScanDueToPageFilterRemoval = false;
         private boolean hasMore;
+        private double loggingPercent;
+        private Random random;
         private String indexName;
         private long pageSizeMs;
 
@@ -171,6 +179,9 @@ public class GlobalIndexChecker extends BaseScannerRegionObserver implements Reg
                         "repairIndexRows: IndexMaintainer is not included in scan attributes for " +
                                 region.getRegionInfo().getTable().getNameAsString());
             }
+            loggingPercent = env.getConfiguration().getDouble(REPAIR_LOGGING_PERCENT_ATTRIB,
+                    DEFAULT_REPAIR_LOGGING_PERCENT);
+            random = new Random(EnvironmentEdgeManager.currentTimeMillis());
             pageSizeMs = getPageSizeMsForRegionScanner(scan);
         }
 
@@ -539,9 +550,18 @@ public class GlobalIndexChecker extends BaseScannerRegionObserver implements Reg
             while (cellIterator.hasNext()) {
                 cell = cellIterator.next();
                 if (isEmptyColumn(cell)) {
-                    if (Bytes.compareTo(cell.getValueArray(), cell.getValueOffset(), cell.getValueLength(),
-                            VERIFIED_BYTES, 0, VERIFIED_BYTES.length) != 0) {
-                        return false;
+                    if (indexMaintainer instanceof TransformMaintainer) {
+                        // This is a transforming table. After cutoff, if there are new mutations on the table,
+                        // their empty col value would be x. So, we are only interested in unverified ones.
+                        if (Bytes.compareTo(cell.getValueArray(), cell.getValueOffset(), cell.getValueLength(),
+                                UNVERIFIED_BYTES, 0, UNVERIFIED_BYTES.length) == 0) {
+                            return false;
+                        }
+                    } else {
+                        if (Bytes.compareTo(cell.getValueArray(), cell.getValueOffset(), cell.getValueLength(),
+                                VERIFIED_BYTES, 0, VERIFIED_BYTES.length) != 0) {
+                            return false;
+                        }
                     }
                     // Empty column is not supposed to be returned to the client except it is the only column included
                     // in the scan
@@ -586,18 +606,28 @@ public class GlobalIndexChecker extends BaseScannerRegionObserver implements Reg
                 byte[] rowKey = CellUtil.cloneRow(cell);
                 long ts = cellList.get(0).getTimestamp();
                 cellList.clear();
-
+                long repairTime;
                 try {
                     repairIndexRows(rowKey, ts, cellList);
+                    repairTime = EnvironmentEdgeManager.currentTimeMillis() - repairStart;
                     metricsSource.incrementIndexRepairs(indexName);
                     metricsSource.updateUnverifiedIndexRowAge(indexName,
                         EnvironmentEdgeManager.currentTimeMillis() - ts);
                     metricsSource.updateIndexRepairTime(indexName,
                         EnvironmentEdgeManager.currentTimeMillis() - repairStart);
+                    if (shouldLog()) {
+                        LOG.info(String.format("Index row repair on region {} took {} ms.",
+                                env.getRegionInfo().getRegionNameAsString(), repairTime));
+                    }
                 } catch (IOException e) {
+                    repairTime = EnvironmentEdgeManager.currentTimeMillis() - repairStart;
                     metricsSource.incrementIndexRepairFailures(indexName);
                     metricsSource.updateIndexRepairFailureTime(indexName,
                         EnvironmentEdgeManager.currentTimeMillis() - repairStart);
+                    if (shouldLog()) {
+                        LOG.warn("Index row repair failure on region {} took {} ms.",
+                                env.getRegionInfo().getRegionNameAsString(), repairTime);
+                    }
                     throw e;
                 }
 
@@ -607,6 +637,13 @@ public class GlobalIndexChecker extends BaseScannerRegionObserver implements Reg
                 }
                 return true;
             }
+        }
+
+        private boolean shouldLog() {
+            if (loggingPercent == 0) {
+                return false;
+            }
+            return (random.nextDouble() <= (loggingPercent / 100.0d));
         }
     }
 

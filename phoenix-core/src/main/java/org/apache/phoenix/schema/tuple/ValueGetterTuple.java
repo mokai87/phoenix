@@ -55,24 +55,23 @@ public class ValueGetterTuple extends BaseTuple {
         return true;
     }
 
-    @Override
-    public KeyValue getValue(byte[] family, byte[] qualifier) {
-        ImmutableBytesWritable value = null;
+    public KeyValue getValueUnsafe(byte[] family, byte[] qualifier) {
         try {
-            value = valueGetter.getLatestValue(new ColumnReference(family, qualifier), ts);
+            return valueGetter.getLatestKeyValue(new ColumnReference(family, qualifier), ts);
         } catch (IOException e) {
             throw new RuntimeException(e);
         }
-        byte[] rowKey = valueGetter.getRowKey();
-        int valueOffset = 0;
-        int valueLength = 0;
-        byte[] valueBytes = HConstants.EMPTY_BYTE_ARRAY;
-        if (value != null) {
-            valueBytes = value.get();
-            valueOffset = value.getOffset();
-            valueLength = value.getLength();
+    }
+
+    @Override
+    public KeyValue getValue(byte[] family, byte[] qualifier) {
+        KeyValue kv = getValueUnsafe(family, qualifier);
+        if (kv != null) {
+            return kv;
         }
-    	return new KeyValue(rowKey, 0, rowKey.length, family, 0, family.length, qualifier, 0, qualifier.length, HConstants.LATEST_TIMESTAMP, Type.Put, valueBytes, valueOffset, valueLength);
+        byte[] rowKey = valueGetter.getRowKey();
+        byte[] valueBytes = HConstants.EMPTY_BYTE_ARRAY;
+    	return new KeyValue(rowKey, 0, rowKey.length, family, 0, family.length, qualifier, 0, qualifier.length, ts, Type.Put, valueBytes, 0, 0);
     }
 
     @Override
@@ -94,8 +93,19 @@ public class ValueGetterTuple extends BaseTuple {
     public boolean getValue(byte[] family, byte[] qualifier,
             ImmutableBytesWritable ptr) {
         KeyValue kv = getValue(family, qualifier);
-        if (kv == null)
+        if (kv == null) {
             return false;
+        }
+        ptr.set(kv.getValueArray(), kv.getValueOffset(), kv.getValueLength());
+        return true;
+    }
+
+    public boolean getValueUnsafe(byte[] family, byte[] qualifier,
+                            ImmutableBytesWritable ptr) {
+        KeyValue kv = getValueUnsafe(family, qualifier);
+        if (kv == null) {
+            return false;
+        }
         ptr.set(kv.getValueArray(), kv.getValueOffset(), kv.getValueLength());
         return true;
     }

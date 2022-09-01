@@ -81,6 +81,7 @@ import org.apache.phoenix.query.QueryServicesOptions;
 import org.apache.phoenix.trace.TracingUtils;
 import org.apache.phoenix.trace.util.NullSpan;
 import org.apache.phoenix.util.EnvironmentEdgeManager;
+import org.apache.phoenix.util.IndexUtil;
 import org.apache.phoenix.util.ScanUtil;
 import org.apache.phoenix.util.ServerUtil;
 import org.apache.phoenix.util.ServerUtil.ConnectionType;
@@ -97,7 +98,7 @@ import org.apache.phoenix.thirdparty.com.google.common.collect.Multimap;
  * If the WAL is enabled, these updates are then added to the WALEdit and attempted to be written to
  * the WAL after the WALEdit has been saved. If any of the index updates fail, this server is
  * immediately terminated and we rely on WAL replay to attempt the index updates again (see
- * {@link #preWALRestore(ObserverContext, HRegionInfo, HLogKey, WALEdit)}).
+ * #preWALRestore(ObserverContext, HRegionInfo, HLogKey, WALEdit)).
  * <p>
  * If the WAL is disabled, the updates are attempted immediately. No consistency guarantees are made
  * if the WAL is disabled - some or none of the index updates may be successful. All updates in a
@@ -367,12 +368,15 @@ public class Indexer implements RegionObserver, RegionCoprocessor {
   public void preBatchMutateWithExceptions(ObserverContext<RegionCoprocessorEnvironment> c,
           MiniBatchOperationInProgress<Mutation> miniBatchOp) throws Throwable {
 
+    // Need to add cell tags to Delete Marker before we do any index processing
+    // since we add tags to tables which doesn't have indexes also.
+    IndexUtil.setDeleteAttributes(miniBatchOp);
       // first group all the updates for a single row into a single update to be processed
       Map<ImmutableBytesPtr, MultiMutation> mutationsMap =
               new HashMap<ImmutableBytesPtr, MultiMutation>();
           
       Durability defaultDurability = Durability.SYNC_WAL;
-      if(c.getEnvironment().getRegion() != null) {
+      if (c.getEnvironment().getRegion() != null) {
           defaultDurability = c.getEnvironment().getRegion().getTableDescriptor().getDurability();
           defaultDurability = (defaultDurability == Durability.USE_DEFAULT) ? 
                   Durability.SYNC_WAL : defaultDurability;
@@ -512,7 +516,7 @@ public class Indexer implements RegionObserver, RegionCoprocessor {
           byte[] tableName = c.getEnvironment().getRegion().getTableDescriptor().getTableName().getName();
           Iterator<Pair<Mutation, byte[]>> indexUpdatesItr = indexUpdates.iterator();
           List<Mutation> localUpdates = new ArrayList<Mutation>(indexUpdates.size());
-          while(indexUpdatesItr.hasNext()) {
+          while (indexUpdatesItr.hasNext()) {
               Pair<Mutation, byte[]> next = indexUpdatesItr.next();
               if (Bytes.compareTo(next.getSecond(), tableName) == 0) {
                   localUpdates.add(next.getFirst());
@@ -731,8 +735,8 @@ public class Indexer implements RegionObserver, RegionCoprocessor {
     /**
      * Validate that the version and configuration parameters are supported
      * @param hbaseVersion current version of HBase on which <tt>this</tt> coprocessor is installed
-     * @param conf configuration to check for allowed parameters (e.g. WAL Compression only if >=
-     *            0.94.9)
+     * @param conf configuration to check for allowed parameters (e.g. WAL Compression only {@code if >=
+     *            0.94.9) }
      * @return <tt>null</tt> if the version is supported, the error message to display otherwise
      */
     public static String validateVersion(String hbaseVersion, Configuration conf) {
@@ -757,11 +761,11 @@ public class Indexer implements RegionObserver, RegionCoprocessor {
 
   /**
    * Enable indexing on the given table
-   * @param desc {@link TableDescriptor} for the table on which indexing should be enabled
- * @param builder class to use when building the index for this table
- * @param properties map of custom configuration options to make available to your
+   * @param descBuilder {@link TableDescriptor} for the table on which indexing should be enabled
+   * @param builder class to use when building the index for this table
+   * @param properties map of custom configuration options to make available to your
    *          {@link IndexBuilder} on the server-side
- * @param priority TODO
+   * @param priority TODO
    * @throws IOException the Indexer coprocessor cannot be added
    */
   public static void enableIndexing(TableDescriptorBuilder descBuilder, Class<? extends IndexBuilder> builder,

@@ -31,25 +31,33 @@ import java.sql.ResultSet;
 import java.sql.Statement;
 import java.util.Map;
 
-import org.apache.phoenix.thirdparty.com.google.common.collect.Maps;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
-import org.apache.hadoop.hbase.HConstants;
+import org.apache.hadoop.hbase.TableName;
+import org.apache.hadoop.hbase.client.Admin;
+import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.mapred.FileAlreadyExistsException;
+import org.apache.phoenix.end2end.index.IndexTestUtil;
 import org.apache.phoenix.jdbc.PhoenixConnection;
 import org.apache.phoenix.mapreduce.CsvBulkLoadTool;
+import org.apache.phoenix.query.QueryConstants;
 import org.apache.phoenix.query.QueryServices;
 import org.apache.phoenix.schema.PTable;
 import org.apache.phoenix.schema.PTableKey;
+import org.apache.phoenix.thirdparty.com.google.common.collect.Maps;
 import org.apache.phoenix.util.DateUtil;
 import org.apache.phoenix.util.PhoenixRuntime;
+import org.apache.phoenix.util.QueryUtil;
 import org.apache.phoenix.util.ReadOnlyProps;
+import org.apache.phoenix.util.SchemaUtil;
 import org.apache.phoenix.util.TestUtil;
 import org.junit.BeforeClass;
 import org.junit.Test;
+import org.junit.experimental.categories.Category;
 
+@Category(NeedsOwnMiniClusterTest.class)
 public class CsvBulkLoadToolIT extends BaseOwnClusterIT {
 
     private static Connection conn;
@@ -101,6 +109,101 @@ public class CsvBulkLoadToolIT extends BaseOwnClusterIT {
         rs.close();
         stmt.close();
     }
+
+    @Test
+    public void testImportWithGlobalIndex() throws Exception {
+
+        Statement stmt = conn.createStatement();
+        stmt.execute("CREATE TABLE S.TABLE1 (ID INTEGER NOT NULL PRIMARY KEY, NAME VARCHAR, T DATE) SPLIT ON (1,2)");
+        stmt.execute("CREATE INDEX glob_idx ON S.TABLE1(ID, T)");
+        conn.commit();
+
+        FileSystem fs = FileSystem.get(getUtility().getConfiguration());
+        FSDataOutputStream outputStream = fs.create(new Path("/tmp/input1.csv"));
+        PrintWriter printWriter = new PrintWriter(outputStream);
+        printWriter.println("1,Name 1,1970/01/01");
+        printWriter.println("2,Name 2,1970/01/02");
+        printWriter.close();
+
+        fs = FileSystem.get(getUtility().getConfiguration());
+        outputStream = fs.create(new Path("/tmp/input2.csv"));
+        printWriter = new PrintWriter(outputStream);
+        printWriter.println("3,Name 3,1970/01/03");
+        printWriter.println("4,Name 4,1970/01/04");
+        printWriter.close();
+
+        CsvBulkLoadTool csvBulkLoadTool = new CsvBulkLoadTool();
+        csvBulkLoadTool.setConf(new Configuration(getUtility().getConfiguration()));
+        csvBulkLoadTool.getConf().set(DATE_FORMAT_ATTRIB,"yyyy/MM/dd");
+        int exitCode = csvBulkLoadTool.run(new String[] {
+                "--input", "/tmp/input1.csv",
+                "--table", "table1",
+                "--schema", "s",
+                "--zookeeper", zkQuorum});
+        assertEquals(0, exitCode);
+
+        csvBulkLoadTool = new CsvBulkLoadTool();
+        csvBulkLoadTool.setConf(new Configuration(getUtility().getConfiguration()));
+        csvBulkLoadTool.getConf().set(DATE_FORMAT_ATTRIB,"yyyy/MM/dd");
+        try {
+            exitCode = csvBulkLoadTool.run(new String[] {
+                    "--input", "/tmp/input2.csv",
+                    "--table", "table1",
+                    "--schema", "s",
+                    "--zookeeper", zkQuorum});
+            fail("Bulk loading error should have happened earlier");
+        } catch (Exception e){
+            assertTrue(e.getMessage().contains("Bulk Loading error: Bulk loading is disabled for " +
+                    "non empty tables with global indexes, because it will corrupt " +
+                    "the global index table in most cases.\n" +
+                    "Use the --corruptindexes option to override this check."));
+        }
+
+        ResultSet rs = stmt.executeQuery("SELECT id, name, t FROM s.table1 ORDER BY id");
+        assertTrue(rs.next());
+        assertEquals(1, rs.getInt(1));
+        assertEquals("Name 1", rs.getString(2));
+        assertEquals(DateUtil.parseDate("1970-01-01"), rs.getDate(3));
+        assertTrue(rs.next());
+        assertEquals(2, rs.getInt(1));
+        assertEquals("Name 2", rs.getString(2));
+        assertEquals(DateUtil.parseDate("1970-01-02"), rs.getDate(3));
+        assertFalse(rs.next());
+
+        csvBulkLoadTool = new CsvBulkLoadTool();
+        csvBulkLoadTool.setConf(new Configuration(getUtility().getConfiguration()));
+        csvBulkLoadTool.getConf().set(DATE_FORMAT_ATTRIB,"yyyy/MM/dd");
+        exitCode = csvBulkLoadTool.run(new String[] {
+                "--input", "/tmp/input2.csv",
+                "--table", "table1",
+                "--schema", "s",
+                "--zookeeper", zkQuorum,
+                "--corruptindexes"});
+        assertEquals(0, exitCode);
+
+        rs = stmt.executeQuery("SELECT id, name, t FROM s.table1 ORDER BY id");
+        assertTrue(rs.next());
+        assertEquals(1, rs.getInt(1));
+        assertEquals("Name 1", rs.getString(2));
+        assertEquals(DateUtil.parseDate("1970-01-01"), rs.getDate(3));
+        assertTrue(rs.next());
+        assertEquals(2, rs.getInt(1));
+        assertEquals("Name 2", rs.getString(2));
+        assertEquals(DateUtil.parseDate("1970-01-02"), rs.getDate(3));
+        assertTrue(rs.next());
+        assertEquals(3, rs.getInt(1));
+        assertEquals("Name 3", rs.getString(2));
+        assertEquals(DateUtil.parseDate("1970-01-03"), rs.getDate(3));
+        assertTrue(rs.next());
+        assertEquals(4, rs.getInt(1));
+        assertEquals("Name 4", rs.getString(2));
+        assertEquals(DateUtil.parseDate("1970-01-04"), rs.getDate(3));
+        assertFalse(rs.next());
+
+        rs.close();
+        stmt.close();
+    }
+
     @Test
     public void testImportWithRowTimestamp() throws Exception {
 
@@ -191,8 +294,8 @@ public class CsvBulkLoadToolIT extends BaseOwnClusterIT {
                 "--input", "/tmp/input8.csv",
                 "--table", "table8",
                 "--zookeeper", zkQuorum,
-                "-q", "\"\"",
-                "-e", "\"\"",
+                "-q", "",
+                "-e", "",
                 "--delimiter", "\\t"
                 });
         assertEquals(0, exitCode);
@@ -318,6 +421,8 @@ public class CsvBulkLoadToolIT extends BaseOwnClusterIT {
 
         rs.close();
         stmt.close();
+
+        IndexTestUtil.assertRowsForEmptyColValue(conn, "TABLE3_IDX", QueryConstants.VERIFIED_BYTES);
     }
 
     @Test
@@ -405,8 +510,88 @@ public class CsvBulkLoadToolIT extends BaseOwnClusterIT {
 
         rs.close();
         stmt.close();
+
+        if (!localIndex) {
+            IndexTestUtil.assertRowsForEmptyColValue(conn, indexTableName,
+                QueryConstants.VERIFIED_BYTES);
+        }
     }
-    
+
+    @Test
+    public void testImportWithDifferentPhysicalName() throws Exception {
+        String schemaName = "S_" + generateUniqueName();
+        String tableName = "TBL_" + generateUniqueName();
+        String indexTableName = String.format("%s_IDX", tableName);
+        String fullTableName = SchemaUtil.getTableName(schemaName, tableName);
+        String fullIndexTableName = SchemaUtil.getTableName(schemaName, indexTableName);
+        Statement stmt = conn.createStatement();
+        stmt.execute("CREATE TABLE " + fullTableName + "(ID INTEGER NOT NULL PRIMARY KEY, "
+                + "FIRST_NAME VARCHAR, LAST_NAME VARCHAR)");
+        String ddl = "CREATE  INDEX " + indexTableName + " ON " + fullTableName + "(FIRST_NAME ASC)";
+        stmt.execute(ddl);
+        String newTableName = LogicalTableNameIT.NEW_TABLE_PREFIX + generateUniqueName();
+        String fullNewTableName = SchemaUtil.getTableName(schemaName, newTableName);
+        try (Admin admin = conn.unwrap(PhoenixConnection.class).getQueryServices().getAdmin()) {
+            String snapshotName = new StringBuilder(tableName).append("-Snapshot").toString();
+            admin.snapshot(snapshotName, TableName.valueOf(fullTableName));
+            admin.cloneSnapshot(Bytes.toBytes(snapshotName), TableName.valueOf(fullNewTableName));
+        }
+        LogicalTableNameIT.renameAndDropPhysicalTable(conn, "NULL", schemaName, tableName, newTableName, false);
+
+        String csvName = "/tmp/input_logical_name.csv";
+        FileSystem fs = FileSystem.get(getUtility().getConfiguration());
+        FSDataOutputStream outputStream = fs.create(new Path(csvName));
+        PrintWriter printWriter = new PrintWriter(outputStream);
+        printWriter.println("1,FirstName 1,LastName 1");
+        printWriter.println("2,FirstName 2,LastName 2");
+        printWriter.close();
+
+        CsvBulkLoadTool csvBulkLoadTool = new CsvBulkLoadTool();
+        csvBulkLoadTool.setConf(getUtility().getConfiguration());
+        int
+                exitCode =
+                csvBulkLoadTool
+                        .run(new String[] { "--input", csvName, "--table", tableName,
+                                "--schema", schemaName,
+                                "--zookeeper", zkQuorum });
+        assertEquals(0, exitCode);
+
+        ResultSet rs = stmt.executeQuery("SELECT /*+ NO_INDEX */ id, FIRST_NAME FROM " + fullTableName + " where first_name='FirstName 2'");
+        assertTrue(rs.next());
+        assertEquals(2, rs.getInt(1));
+        assertEquals("FirstName 2", rs.getString(2));
+        String selectFromIndex = "SELECT FIRST_NAME FROM " + fullTableName + " where FIRST_NAME='FirstName 1'";
+        rs = stmt.executeQuery("EXPLAIN " + selectFromIndex);
+        assertTrue(QueryUtil.getExplainPlan(rs).contains(indexTableName));
+        rs = stmt.executeQuery(selectFromIndex);
+        assertTrue(rs.next());
+        assertEquals("FirstName 1", rs.getString(1));
+
+        String csvNameForIndex = "/tmp/input_logical_name_index.csv";
+        // Now just run the tool on the index table and check that the index has extra row.
+        outputStream = fs.create(new Path(csvNameForIndex));
+        printWriter = new PrintWriter(outputStream);
+        printWriter.println("3,FirstName 3,LastName 3");
+        printWriter.close();
+        exitCode = csvBulkLoadTool
+                        .run(new String[] { "--input", csvNameForIndex, "--table", tableName,
+                                "--schema", schemaName,
+                                "--index-table", indexTableName, "--zookeeper", zkQuorum,
+                                "--corruptindexes"});
+        assertEquals(0, exitCode);
+        selectFromIndex = "SELECT FIRST_NAME FROM " + fullTableName + " where FIRST_NAME='FirstName 3'";
+        rs = stmt.executeQuery("EXPLAIN " + selectFromIndex);
+        assertTrue(QueryUtil.getExplainPlan(rs).contains(indexTableName));
+        rs = stmt.executeQuery(selectFromIndex);
+        assertTrue(rs.next());
+        assertEquals("FirstName 3", rs.getString(1));
+        rs.close();
+        stmt.close();
+
+        IndexTestUtil.assertRowsForEmptyColValue(conn, fullIndexTableName,
+            QueryConstants.VERIFIED_BYTES);
+    }
+
     @Test
     public void testInvalidArguments() {
         String tableName = "TABLE8";
@@ -588,7 +773,7 @@ public class CsvBulkLoadToolIT extends BaseOwnClusterIT {
         csvBulkLoadTool.getConf().set(DATE_FORMAT_ATTRIB,"yyyy/MM/dd");
         int exitCode = csvBulkLoadTool.run(new String[] {
                 "--input", "/tmp/input1.csv",
-                "--table", "\"\"t\"\"",
+                "--table", "\"t\"",
                 "--schema", "S",
                 "--zookeeper", zkQuorum});
         assertEquals(0, exitCode);
@@ -623,7 +808,7 @@ public class CsvBulkLoadToolIT extends BaseOwnClusterIT {
         int exitCode = csvBulkLoadTool.run(new String[] {
                 "--input", "/tmp/input1.csv",
                 "--table", "T",
-                "--schema", "\"\"s\"\"",
+                "--schema", "\"s\"",
                 "--zookeeper", zkQuorum});
         assertEquals(0, exitCode);
         ResultSet rs = stmt.executeQuery("SELECT id, name, t FROM \"s\".T ORDER BY id");

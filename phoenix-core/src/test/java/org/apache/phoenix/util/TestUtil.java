@@ -38,6 +38,9 @@ import java.io.File;
 import java.io.IOException;
 import java.math.BigDecimal;
 import java.net.ServerSocket;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.sql.Connection;
 import java.sql.Date;
 import java.sql.DriverManager;
@@ -145,7 +148,6 @@ import org.apache.phoenix.schema.stats.GuidePostsInfo;
 import org.apache.phoenix.schema.stats.GuidePostsKey;
 import org.apache.phoenix.schema.tuple.Tuple;
 import org.apache.phoenix.schema.types.PDataType;
-import org.apache.phoenix.transaction.TransactionFactory;
 import org.junit.Assert;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -1264,30 +1266,6 @@ public class TestUtil {
         assertTrue(!rs.next());
     }
 
-    public static Collection<Object[]> filterTxParamData(Collection<Object[]> data, int index) {
-        boolean runAllTests = true;
-        boolean runNoTests = true;
-
-        for (TransactionFactory.Provider provider : TransactionFactory.Provider.values()) {
-            runAllTests &= provider.runTests();
-            runNoTests &= !provider.runTests();
-        }
-        if (runNoTests) {
-            return Collections.emptySet();
-        }
-        if (runAllTests) {
-            return data;
-        }
-        List<Object[]> filteredData = Lists.newArrayListWithExpectedSize(data.size());
-        for (Object[] params : data) {
-            String provider = (String) params[index];
-            if (provider == null || TransactionFactory.Provider.valueOf(provider).runTests()) {
-                filteredData.add(params);
-            }
-        }
-        return filteredData;
-    }
-
     /**
      * Find a random free port in localhost for binding.
      *
@@ -1413,6 +1391,10 @@ public class TestUtil {
         }
     }
 
-
+    public static Path createTempDirectory() throws IOException {
+        // We cannot use java.nio.file.Files.createTempDirectory(null),
+        // because that caches the value of "java.io.tmpdir" on class load.
+        return Files.createTempDirectory(Paths.get(System.getProperty("java.io.tmpdir")), null);
+    }
 
 }

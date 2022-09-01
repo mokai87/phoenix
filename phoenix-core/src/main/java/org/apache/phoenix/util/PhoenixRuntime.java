@@ -17,14 +17,14 @@
  */
 package org.apache.phoenix.util;
 
-import static org.apache.phoenix.thirdparty.com.google.common.base.Preconditions.checkNotNull;
-import static org.apache.phoenix.thirdparty.com.google.common.base.Preconditions.checkArgument;
 import static org.apache.phoenix.schema.types.PDataType.ARRAY_TYPE_SUFFIX;
 
 import java.io.File;
-import java.io.FileReader;
+import java.io.FileInputStream;
 import java.io.IOException;
+import java.io.InputStreamReader;
 import java.io.Reader;
+import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.PreparedStatement;
@@ -32,6 +32,7 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.SQLFeatureNotSupportedException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.Iterator;
@@ -44,13 +45,16 @@ import java.util.TreeSet;
 
 import javax.annotation.Nullable;
 
-import org.apache.commons.cli.CommandLine;
-import org.apache.commons.cli.CommandLineParser;
-import org.apache.commons.cli.HelpFormatter;
-import org.apache.commons.cli.Option;
-import org.apache.commons.cli.Options;
-import org.apache.commons.cli.ParseException;
-import org.apache.commons.cli.PosixParser;
+import org.apache.phoenix.jdbc.PhoenixMonitoredConnection;
+import org.apache.phoenix.jdbc.PhoenixMonitoredResultSet;
+import org.apache.phoenix.thirdparty.org.apache.commons.cli.CommandLine;
+import org.apache.phoenix.thirdparty.org.apache.commons.cli.CommandLineParser;
+import org.apache.phoenix.thirdparty.org.apache.commons.cli.DefaultParser;
+import org.apache.phoenix.thirdparty.org.apache.commons.cli.HelpFormatter;
+import org.apache.phoenix.thirdparty.org.apache.commons.cli.Option;
+import org.apache.phoenix.thirdparty.org.apache.commons.cli.Options;
+import org.apache.phoenix.thirdparty.org.apache.commons.cli.ParseException;
+
 import org.apache.commons.lang3.StringEscapeUtils;
 import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.HConstants;
@@ -68,6 +72,7 @@ import org.apache.phoenix.jdbc.PhoenixConnection;
 import org.apache.phoenix.jdbc.PhoenixPreparedStatement;
 import org.apache.phoenix.jdbc.PhoenixResultSet;
 import org.apache.phoenix.jdbc.PhoenixStatement;
+import org.apache.phoenix.jdbc.PhoenixDatabaseMetaData;
 import org.apache.phoenix.monitoring.GlobalClientMetrics;
 import org.apache.phoenix.monitoring.GlobalMetric;
 import org.apache.phoenix.monitoring.MetricType;
@@ -91,6 +96,9 @@ import org.apache.phoenix.schema.RowKeyValueAccessor;
 import org.apache.phoenix.schema.TableNotFoundException;
 import org.apache.phoenix.schema.ValueBitSet;
 import org.apache.phoenix.schema.types.PDataType;
+import org.apache.phoenix.monitoring.HistogramDistribution;
+import org.apache.phoenix.monitoring.PhoenixTableMetric;
+import org.apache.phoenix.monitoring.TableMetricsManager;
 
 import org.apache.phoenix.thirdparty.com.google.common.base.Function;
 import org.apache.phoenix.thirdparty.com.google.common.base.Joiner;
@@ -98,6 +106,10 @@ import org.apache.phoenix.thirdparty.com.google.common.base.Splitter;
 import org.apache.phoenix.thirdparty.com.google.common.collect.ImmutableList;
 import org.apache.phoenix.thirdparty.com.google.common.collect.Lists;
 import org.apache.phoenix.thirdparty.com.google.common.collect.Maps;
+import org.apache.hbase.thirdparty.com.google.common.annotations.VisibleForTesting;
+import static org.apache.phoenix.monitoring.MetricType.NUM_METADATA_LOOKUP_FAILURES;
+import static org.apache.phoenix.thirdparty.com.google.common.base.Preconditions.checkNotNull;
+import static org.apache.phoenix.thirdparty.com.google.common.base.Preconditions.checkArgument;
 
 /**
  *
@@ -107,17 +119,36 @@ import org.apache.phoenix.thirdparty.com.google.common.collect.Maps;
  * @since 0.1
  */
 public class PhoenixRuntime {
+    public final static char JDBC_PROTOCOL_TERMINATOR = ';';
+    public final static char JDBC_PROTOCOL_SEPARATOR = ':';
+
+    /**
+     * JDBC URL jdbc protocol identifier
+     */
+    public final static String JDBC_PROTOCOL_IDENTIFIER = "jdbc";
+
+    /**
+     * JDBC URL phoenix protocol identifier
+     */
+    public final static String JDBC_PHOENIX_PROTOCOL_IDENTIFIER = "phoenix";
+
+    /**
+     * JDBC URL phoenix protocol identifier
+     */
+    public final static String JDBC_PHOENIX_THIN_IDENTIFIER = "thin";
+
     /**
      * Root for the JDBC URL that the Phoenix accepts accepts.
      */
-    public final static String JDBC_PROTOCOL = "jdbc:phoenix";
+    public final static String JDBC_PROTOCOL = JDBC_PROTOCOL_IDENTIFIER + JDBC_PROTOCOL_SEPARATOR + JDBC_PHOENIX_PROTOCOL_IDENTIFIER;
+
     /**
      * Root for the JDBC URL used by the thin driver. Duplicated here to avoid dependencies
      * between modules.
      */
-    public final static String JDBC_THIN_PROTOCOL = "jdbc:phoenix:thin";
-    public final static char JDBC_PROTOCOL_TERMINATOR = ';';
-    public final static char JDBC_PROTOCOL_SEPARATOR = ':';
+    public final static String JDBC_THIN_PROTOCOL = JDBC_PROTOCOL + JDBC_PROTOCOL_SEPARATOR + JDBC_PHOENIX_THIN_IDENTIFIER;
+
+
 
     @Deprecated
     public final static String EMBEDDED_JDBC_PROTOCOL = PhoenixRuntime.JDBC_PROTOCOL + PhoenixRuntime.JDBC_PROTOCOL_SEPARATOR;
@@ -209,7 +240,7 @@ public class PhoenixRuntime {
      * All Phoenix specific connection properties
      * TODO: use enum instead
      */
-    public final static String[] CONNECTION_PROPERTIES = {
+    private final static String[] CONNECTION_PROPERTIES = {
             CURRENT_SCN_ATTRIB,
             TENANT_ID_ATTRIB,
             UPSERT_BATCH_SIZE_ATTRIB,
@@ -295,7 +326,9 @@ public class PhoenixRuntime {
             } else {
                 for (String inputFile : execCmd.getInputFiles()) {
                     if (inputFile.endsWith(SQL_FILE_EXT)) {
-                        PhoenixRuntime.executeStatements(conn, new FileReader(inputFile), Collections.emptyList());
+                        PhoenixRuntime.executeStatements(conn, new InputStreamReader(
+                            new FileInputStream(inputFile), StandardCharsets.UTF_8),
+                            Collections.emptyList());
                     } else if (inputFile.endsWith(CSV_FILE_EXT)) {
 
                         String tableName = execCmd.getTableName();
@@ -330,6 +363,10 @@ public class PhoenixRuntime {
     public static final String SCHEMA_ATTRIB = "schema";
 
     private PhoenixRuntime() {
+    }
+
+    public static final String[] getConnectionProperties() {
+        return Arrays.copyOf(CONNECTION_PROPERTIES, CONNECTION_PROPERTIES.length);
     }
 
     /**
@@ -446,7 +483,7 @@ public class PhoenixRuntime {
      * @throws SQLException
      */
     public static PTable getTable(Connection conn, String name) throws SQLException {
-        PTable table = null;
+        PTable table;
         PhoenixConnection pconn = conn.unwrap(PhoenixConnection.class);
         try {
             table = pconn.getTable(new PTableKey(pconn.getTenantId(), name));
@@ -456,6 +493,7 @@ public class PhoenixRuntime {
             MetaDataMutationResult result =
                     new MetaDataClient(pconn).updateCache(schemaName, tableName);
             if (result.getMutationCode() != MutationCode.TABLE_ALREADY_EXISTS) {
+                TableMetricsManager.updateMetricsForSystemCatalogTableMethod(name, NUM_METADATA_LOOKUP_FAILURES, 1);
                 throw e;
             }
             table = result.getTable();
@@ -701,7 +739,10 @@ public class PhoenixRuntime {
             options.addOption(localIndexUpgradeOption);
             options.addOption(binaryEncodingOption);
 
-            CommandLineParser parser = new PosixParser();
+            CommandLineParser parser = DefaultParser.builder().
+                    setAllowPartialMatching(false).
+                    setStripLeadingAndTrailingQuotes(false).
+                    build();
             CommandLine cmdLine = null;
             try {
                 cmdLine = parser.parse(options, args);
@@ -1092,7 +1133,7 @@ public class PhoenixRuntime {
      * of their values in the object array.
      * @return values encoded in a byte array 
      * @throws SQLException
-     * @see {@link #decodeValues(Connection, String, byte[], List)}
+     * @see decodeValues(Connection, String, byte[], List)
      */
     @Deprecated
     public static byte[] encodeValues(Connection conn, String fullTableName, Object[] values, List<Pair<String, String>> columns) throws SQLException {
@@ -1158,7 +1199,7 @@ public class PhoenixRuntime {
      * of their values in the object array.
      * @return values encoded in a byte array 
      * @throws SQLException
-     * @see {@link #decodeValues(Connection, String, byte[], List)}
+     * @see decodeValues(Connection, String, byte[], List)
      */
     public static byte[] encodeColumnValues(Connection conn, String fullTableName, Object[] values, List<Pair<String, String>> columns) throws SQLException {
         PTable table = getTable(conn, fullTableName);
@@ -1367,6 +1408,31 @@ public class PhoenixRuntime {
     public static Collection<GlobalMetric> getGlobalPhoenixClientMetrics() {
         return GlobalClientMetrics.getMetrics();
     }
+
+    /**
+     * This function will be called mainly in Metric Publisher methods.
+     * Its the only way Metric publisher will be able to access the metrics in phoenix system.
+     * @return map of TableName to List of GlobalMetric's.
+     */
+    public static Map<String,List<PhoenixTableMetric>> getPhoenixTableClientMetrics() {
+        return TableMetricsManager.getTableMetricsMethod();
+    }
+
+    public static Map<String, List<HistogramDistribution>> getLatencyHistograms() {
+        return TableMetricsManager.getLatencyHistogramsForAllTables();
+    }
+
+    public static Map<String, List<HistogramDistribution>> getSizeHistograms() {
+        return TableMetricsManager.getSizeHistogramsForAllTables();
+    }
+
+    /**
+     * This is only used in testcases to reset the tableLevel Metrics data
+     */
+    @VisibleForTesting
+    public static void clearTableLevelMetrics(){
+        TableMetricsManager.clearTableLevelMetricsMethod();
+    }
     
     /**
      * 
@@ -1409,15 +1475,18 @@ public class PhoenixRuntime {
      *    requestReadMetrics = PhoenixRuntime.getRequestReadMetrics(rs);
      *    PhoenixRuntime.resetMetrics(rs);
      * }
+     * }
      * </pre>
      * 
      * @param rs
      *            result set to get the metrics for
-     * @return a map of (table name) -> (map of (metric name) -> (metric value))
+     * @return a map of {@code (table name) -> (map of (metric name) -> (metric value)) }
      * @throws SQLException
      */
     public static Map<String, Map<MetricType, Long>> getRequestReadMetricInfo(ResultSet rs) throws SQLException {
-        PhoenixResultSet resultSet = rs.unwrap(PhoenixResultSet.class);
+        PhoenixMonitoredResultSet
+                resultSet = rs.unwrap(PhoenixMonitoredResultSet
+                .class);
         return resultSet.getReadMetrics();
     }
     
@@ -1443,15 +1512,17 @@ public class PhoenixRuntime {
      *    requestReadMetrics = PhoenixRuntime.getRequestReadMetrics(rs);
      *    PhoenixRuntime.resetMetrics(rs);
      * }
+     * }
      * </pre>
      * 
      * @param rs
      *            result set to get the metrics for
-     * @return a map of metric name -> metric value
+     * @return a map of {@code  metric name -> metric value }
      * @throws SQLException
      */
     public static Map<MetricType, Long> getOverAllReadRequestMetricInfo(ResultSet rs) throws SQLException {
-        PhoenixResultSet resultSet = rs.unwrap(PhoenixResultSet.class);
+        PhoenixMonitoredResultSet
+                resultSet = rs.unwrap(PhoenixMonitoredResultSet.class);
         return resultSet.getOverAllRequestReadMetrics();
     }
     
@@ -1482,15 +1553,17 @@ public class PhoenixRuntime {
      *    mutationReadMetrics = PhoenixRuntime.getReadMetricsForMutationsSinceLastReset(conn);
      *    PhoenixRuntime.resetMetrics(rs);
      * }
+     * }
      * </pre>
      *  
      * @param conn
      *            connection to get the metrics for
-     * @return a map of (table name) -> (map of (metric name) -> (metric value))
+     * @return a map of {@code  (table name) -> (map of (metric name) -> (metric value)) }
      * @throws SQLException
      */
     public static Map<String, Map<MetricType, Long>> getWriteMetricInfoForMutationsSinceLastReset(Connection conn) throws SQLException {
-        PhoenixConnection pConn = conn.unwrap(PhoenixConnection.class);
+        PhoenixMonitoredConnection
+                pConn = conn.unwrap(PhoenixMonitoredConnection.class);
         return pConn.getMutationMetrics();
     }
     
@@ -1521,14 +1594,15 @@ public class PhoenixRuntime {
      *    mutationReadMetrics = PhoenixRuntime.getReadMetricsForMutationsSinceLastReset(conn);
      *    PhoenixRuntime.resetMetrics(rs);
      * }
+     * }
      * </pre> 
      * @param conn
      *            connection to get the metrics for
-     * @return  a map of (table name) -> (map of (metric name) -> (metric value))
+     * @return  a map of {@code  (table name) -> (map of (metric name) -> (metric value)) }
      * @throws SQLException
      */
     public static Map<String, Map<MetricType, Long>> getReadMetricInfoForMutationsSinceLastReset(Connection conn) throws SQLException {
-        PhoenixConnection pConn = conn.unwrap(PhoenixConnection.class);
+        PhoenixMonitoredConnection pConn = conn.unwrap(PhoenixMonitoredConnection.class);
         return pConn.getReadMetrics();
     }
     
@@ -1541,24 +1615,26 @@ public class PhoenixRuntime {
     /**
      * Reset the read metrics collected in the result set.
      * 
-     * @see {@link #getRequestReadMetrics(ResultSet)} {@link #getOverAllReadRequestMetrics(ResultSet)}
+     * @see  #getRequestReadMetrics(ResultSet) #getOverAllReadRequestMetrics(ResultSet)
      * @param rs
      * @throws SQLException
      */
     public static void resetMetrics(ResultSet rs) throws SQLException {
-        PhoenixResultSet prs = rs.unwrap(PhoenixResultSet.class);
+        PhoenixMonitoredResultSet
+                prs = rs.unwrap(PhoenixMonitoredResultSet.class);
         prs.resetMetrics();
     }
     
     /**
      * Reset the mutation and reads-for-mutations metrics collected in the connection.
      * 
-     * @see {@link #getReadMetricsForMutationsSinceLastReset(Connection)} {@link #getWriteMetricsForMutationsSinceLastReset(Connection)}
+     * @see #getReadMetricsForMutationsSinceLastReset(Connection) #getWriteMetricsForMutationsSinceLastReset(Connection)
      * @param conn
      * @throws SQLException
      */
     public static void resetMetrics(Connection conn) throws SQLException {
-        PhoenixConnection pConn = conn.unwrap(PhoenixConnection.class);
+        PhoenixMonitoredConnection
+                pConn = conn.unwrap(PhoenixMonitoredConnection.class);
         pConn.clearMetrics();
     }
     

@@ -22,7 +22,6 @@ import java.sql.SQLException;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.client.Put;
-import org.apache.hadoop.hbase.coprocessor.RegionObserver;
 import org.apache.phoenix.jdbc.PhoenixConnection;
 import org.apache.phoenix.jdbc.PhoenixEmbeddedDriver.ConnectionInfo;
 import org.apache.phoenix.transaction.TransactionFactory.Provider;
@@ -30,7 +29,7 @@ import org.apache.phoenix.transaction.TransactionFactory.Provider;
 public class NotAvailableTransactionProvider implements PhoenixTransactionProvider {
     private static final NotAvailableTransactionProvider INSTANCE = new NotAvailableTransactionProvider();
 
-    private static final String message="This Phoenix has been built without Tephra support";
+    private static final String message = "Phoenix no longer supports the Tephra transaction processor.";
 
     public static final NotAvailableTransactionProvider getInstance() {
         return INSTANCE;
@@ -60,26 +59,26 @@ public class NotAvailableTransactionProvider implements PhoenixTransactionProvid
     }
 
     @Override
-    public PhoenixTransactionService getTransactionService(Configuration config, ConnectionInfo connInfo, int port) {
-        throw new UnsupportedOperationException(message);
-    }
-
-    @Override
-    public Class<? extends RegionObserver> getCoprocessor() {
-        throw new UnsupportedOperationException(message);
-    }
-
-    @Override
-    public Class<? extends RegionObserver> getGCCoprocessor() {return null;}
-
-    @Override
     public Provider getProvider() {
-        return TransactionFactory.Provider.TEPHRA;
+        return TransactionFactory.Provider.NOTAVAILABLE;
+    }
+
+    @Override
+    public String getCoprocessorClassName() {
+        // No coprocessor is required
+        return null;
+    }
+
+    @Override
+    public String getGCCoprocessorClassName() {
+        // No GC coprocessor is required
+        return null;
     }
 
     @Override
     public boolean isUnsupported(Feature feature) {
-        throw new UnsupportedOperationException(message);
+        // All features are unsupported
+        return true;
     }
 
     @Override

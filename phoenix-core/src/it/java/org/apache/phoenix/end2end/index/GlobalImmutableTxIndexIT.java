@@ -20,22 +20,24 @@ package org.apache.phoenix.end2end.index;
 import java.util.Arrays;
 import java.util.Collection;
 
-import org.apache.phoenix.util.TestUtil;
+import org.apache.phoenix.end2end.ParallelStatsDisabledTest;
+import org.junit.experimental.categories.Category;
 import org.junit.runners.Parameterized.Parameters;
 
+@Category(ParallelStatsDisabledTest.class)
 public class GlobalImmutableTxIndexIT extends BaseIndexIT {
 
     public GlobalImmutableTxIndexIT(boolean localIndex, boolean mutable, String transactionProvider, boolean columnEncoded) {
         super(localIndex, mutable, transactionProvider, columnEncoded);
     }
 
-    @Parameters(name="GlobalImmutableTxIndexIT_localIndex={0},mutable={1},transactionProvider={2},columnEncoded={3}") // name is used by failsafe as file name in reports
+    // name is used by failsafe as file name in reports
+    @Parameters(name="GlobalImmutableTxIndexIT_localIndex={0},mutable={1},transactionProvider={2},columnEncoded={3}")
     public static synchronized Collection<Object[]> data() {
-        return TestUtil.filterTxParamData(
-                Arrays.asList(new Object[][] {
-                    { false, false, "TEPHRA", false }, { false, false, "TEPHRA", true }, 
-                    { false, false, "OMID", false },
-               }), 2);
+        return Arrays.asList(new Object[][] {
+            // OMID does not support local indexes or column encoding
+            { false, false, "OMID", false },
+        });
     }
 
 }

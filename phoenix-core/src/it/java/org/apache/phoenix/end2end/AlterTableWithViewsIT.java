@@ -45,7 +45,6 @@ import org.apache.hadoop.hbase.client.ResultScanner;
 import org.apache.hadoop.hbase.client.Scan;
 import org.apache.hadoop.hbase.client.Table;
 import org.apache.hadoop.hbase.util.Bytes;
-import org.apache.phoenix.coprocessor.TephraTransactionalProcessor;
 import org.apache.phoenix.exception.SQLExceptionCode;
 import org.apache.phoenix.jdbc.PhoenixConnection;
 import org.apache.phoenix.jdbc.PhoenixDatabaseMetaData;
@@ -59,7 +58,6 @@ import org.apache.phoenix.schema.PTable;
 import org.apache.phoenix.schema.PTableKey;
 import org.apache.phoenix.schema.PTableType;
 import org.apache.phoenix.schema.TableNotFoundException;
-import org.apache.phoenix.transaction.TransactionFactory;
 import org.apache.phoenix.util.EnvironmentEdgeManager;
 import org.apache.phoenix.util.IndexUtil;
 import org.apache.phoenix.util.PhoenixRuntime;
@@ -68,6 +66,7 @@ import org.apache.phoenix.util.SchemaUtil;
 import org.apache.phoenix.util.TestUtil;
 import org.junit.Assume;
 import org.junit.Test;
+import org.junit.experimental.categories.Category;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
 import org.junit.runners.Parameterized.Parameters;
@@ -75,6 +74,7 @@ import org.junit.runners.Parameterized.Parameters;
 import org.apache.phoenix.thirdparty.com.google.common.base.Function;
 import org.apache.phoenix.thirdparty.com.google.common.collect.Lists;
 
+@Category(NeedsOwnMiniClusterTest.class)
 @RunWith(Parameterized.class)
 public class AlterTableWithViewsIT extends SplitSystemCatalogIT {
 
@@ -986,9 +986,6 @@ public class AlterTableWithViewsIT extends SplitSystemCatalogIT {
     
     @Test
     public void testMakeBaseTableTransactional() throws Exception {
-        if (!TransactionFactory.Provider.TEPHRA.runTests()) {
-            return;
-        }
         Properties props = PropertiesUtil.deepCopy(TestUtil.TEST_PROPERTIES);
         props.setProperty(QueryServices.TRANSACTIONS_ENABLED, Boolean.TRUE.toString());
         try (Connection conn = DriverManager.getConnection(getUrl(), props);
@@ -1011,19 +1008,8 @@ public class AlterTableWithViewsIT extends SplitSystemCatalogIT {
             PName tenantId = isMultiTenant ? PNameFactory.newName(TENANT1) : null;
             PhoenixConnection phoenixConn = conn.unwrap(PhoenixConnection.class);
             Table htable = phoenixConn.getQueryServices().getTable(Bytes.toBytes(baseTableName));
-            assertFalse(htable.getTableDescriptor().getCoprocessors().contains(TephraTransactionalProcessor.class.getName()));
             assertFalse(phoenixConn.getTable(new PTableKey(null, baseTableName)).isTransactional());
             assertFalse(viewConn.unwrap(PhoenixConnection.class).getTable(new PTableKey(tenantId, viewOfTable)).isTransactional());
-            
-            // make the base table transactional and explicitly set TEPHRA as provider since only it
-            // supports transitioning from non transactional to transactional
-            conn.createStatement().execute("ALTER TABLE " + baseTableName + " SET TRANSACTIONAL=true, TRANSACTION_PROVIDER='TEPHRA'");
-            // query the view to force the table cache to be updated
-            viewConn.createStatement().execute("SELECT * FROM " + viewOfTable);
-            htable = phoenixConn.getQueryServices().getTable(Bytes.toBytes(baseTableName));
-            assertTrue(htable.getTableDescriptor().getCoprocessors().contains(TephraTransactionalProcessor.class.getName()));
-            assertTrue(phoenixConn.getTable(new PTableKey(null, baseTableName)).isTransactional());
-            assertTrue(viewConn.unwrap(PhoenixConnection.class).getTable(new PTableKey(tenantId, viewOfTable)).isTransactional());
         } 
     }
 
@@ -1465,6 +1451,36 @@ public class AlterTableWithViewsIT extends SplitSystemCatalogIT {
 
     }
 
+    @Test
+    public void testCreateViewSchemaVersion() throws Exception {
+        Properties props = new Properties();
+        final String schemaName = generateUniqueName();
+        final String tableName = generateUniqueName();
+        final String viewName = generateUniqueName();
+        final String dataTableFullName = SchemaUtil.getTableName(schemaName, tableName);
+        final String viewFullName = SchemaUtil.getTableName(schemaName, viewName);
+        try (Connection conn = DriverManager.getConnection(getUrl(), props)) {
+            String oldVersion = "V1.0";
+            CreateTableIT.testCreateTableSchemaVersionAndTopicNameHelper(conn, schemaName, tableName, oldVersion, null);
+            String createViewSql = "CREATE VIEW " + viewFullName + " AS SELECT * FROM " + dataTableFullName +
+                    " SCHEMA_VERSION='" + oldVersion + "'";
+            conn.createStatement().execute(createViewSql);
+            PTable view = PhoenixRuntime.getTableNoCache(conn, viewFullName);
+            assertEquals(oldVersion, view.getSchemaVersion());
+            assertNull(view.getStreamingTopicName());
 
+            String newVersion = "V1.1";
+            String topicName = "MyTopicName";
+            String alterViewSql = "ALTER VIEW " + viewFullName + " SET SCHEMA_VERSION='"
+                + newVersion + "', STREAMING_TOPIC_NAME='" + topicName + "'";
+            conn.createStatement().execute(alterViewSql);
+            PTable view2 = PhoenixRuntime.getTableNoCache(conn, viewFullName);
+            assertEquals(newVersion, view2.getSchemaVersion());
+            PTable baseTable = PhoenixRuntime.getTableNoCache(conn, dataTableFullName);
+            assertEquals(oldVersion, baseTable.getSchemaVersion());
+            assertNull(baseTable.getStreamingTopicName());
+            assertEquals(topicName, view2.getStreamingTopicName());
+        }
+    }
 
 }

@@ -85,7 +85,16 @@ public class HashCacheClient  {
      * Send the results of scanning through the scanner to all
      * region servers for regions of the table that will use the cache
      * that intersect with the minMaxKeyRange.
-     * @param scanner scanner for the table or intermediate results being cached
+     * @param keyRanges
+     * @param cacheId
+     * @param iterator
+     * @param estimatedSize
+     * @param onExpressions
+     * @param singleValueOnly
+     * @param usePersistentCache
+     * @param cacheUsingTable
+     * @param keyRangeRhsExpression
+     * @param keyRangeRhsValues
      * @return client-side {@link ServerCache} representing the added hash cache
      * @throws SQLException 
      * @throws MaxServerCacheSizeExceededException if size of hash cache exceeds max allowed
@@ -119,7 +128,9 @@ public class HashCacheClient  {
     }
     
     private void serialize(ImmutableBytesWritable ptr, ResultIterator iterator, long estimatedSize, List<Expression> onExpressions, boolean singleValueOnly, Expression keyRangeRhsExpression, List<Expression> keyRangeRhsValues) throws SQLException {
-        long maxSize = serverCache.getConnection().getQueryServices().getProps().getLong(QueryServices.MAX_SERVER_CACHE_SIZE_ATTRIB, QueryServicesOptions.DEFAULT_MAX_SERVER_CACHE_SIZE);
+        long maxSize = serverCache.getConnection().getQueryServices().getProps()
+                .getLongBytes(QueryServices.MAX_SERVER_CACHE_SIZE_ATTRIB,
+                        QueryServicesOptions.DEFAULT_MAX_SERVER_CACHE_SIZE);
         estimatedSize = Math.min(estimatedSize, maxSize);
         if (estimatedSize > Integer.MAX_VALUE) {
             throw new IllegalStateException("Estimated size(" + estimatedSize + ") must not be greater than Integer.MAX_VALUE(" + Integer.MAX_VALUE + ")");

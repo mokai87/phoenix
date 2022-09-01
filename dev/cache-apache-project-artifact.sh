@@ -102,7 +102,9 @@ if [ -n "${keys}" ]; then
     mkdir -p "${working_dir}/.gpg"
     chmod -R 700 "${working_dir}/.gpg"
   fi
-
+  gpgconf --homedir "${working_dir}/.gpg" --create-socketdir || true
+  #shellcheck disable=SC2086
+  echo "socketdir is $(gpgconf --homedir ${working_dir}/.gpg --list-dirs socketdir)"
   echo "installing project KEYS"
   curl -L --fail -o "${working_dir}/KEYS" "${keys}"
   if ! gpg --homedir "${working_dir}/.gpg" --import "${working_dir}/KEYS" ; then
@@ -120,7 +122,7 @@ if [ -n "${keys}" ]; then
 fi
 
 echo "downloading artifact"
-if ! curl --dump-header "${working_dir}/artifact_download_headers.txt" -L --fail -o "${working_dir}/artifact" "https://www.apache.org/dyn/closer.lua?filename=${artifact}&action=download" ; then
+if ! curl --dump-header "${working_dir}/artifact_download_headers.txt" -L --fail -o "${working_dir}/artifact" "https://www.apache.org/dyn/closer.lua/${artifact}?action=download" ; then
   echo "Artifact wasn't in mirror system. falling back to archive.a.o."
   curl --dump-header "${working_dir}/artifact_fallback_headers.txt" -L --fail -o "${working_dir}/artifact" "http://archive.apache.org/dist/${artifact}"
 fi

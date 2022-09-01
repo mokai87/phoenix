@@ -22,7 +22,7 @@
     <parent>
       <groupId>org.apache.phoenix</groupId>
       <artifactId>phoenix</artifactId>
-      <version>5.1.0-SNAPSHOT</version>
+      <version>5.2.0-SNAPSHOT</version>
     </parent>
 
     <artifactId>phoenix-tracing-webapp</artifactId>
@@ -30,11 +30,9 @@
     <description>Tracing web application will visualize the phoenix traces</description>
 
     <properties>
-       <top.dir>${project.basedir}/..</top.dir>
-
        <!-- tracing webapp only versions -->
        <servlet.api.version>3.1.0</servlet.api.version>
-       <jetty.version>9.3.27.v20190418</jetty.version>
+       <jetty.version>9.4.43.v20210629</jetty.version>
     </properties>
 
 
@@ -64,9 +62,20 @@
         <artifactId>slf4j-api</artifactId>
       </dependency>
       <dependency>
-        <groupId>log4j</groupId>
-        <artifactId>log4j</artifactId>
-        <scope>compile</scope>
+        <groupId>org.apache.logging.log4j</groupId>
+        <artifactId>log4j-api</artifactId>
+      </dependency>
+      <dependency>
+        <groupId>org.apache.logging.log4j</groupId>
+        <artifactId>log4j-core</artifactId>
+      </dependency>
+      <dependency>
+        <groupId>org.apache.logging.log4j</groupId>
+        <artifactId>log4j-slf4j-impl</artifactId>
+      </dependency>
+      <dependency>
+        <groupId>org.apache.logging.log4j</groupId>
+        <artifactId>log4j-1.2-api</artifactId>
       </dependency>
       <dependency>
         <groupId>org.apache.phoenix</groupId>

@@ -23,12 +23,12 @@
   <parent>
     <groupId>org.apache.phoenix</groupId>
     <artifactId>phoenix</artifactId>
-    <version>5.1.0-SNAPSHOT</version>
+    <version>5.2.0-SNAPSHOT</version>
   </parent>
 
   <artifactId>phoenix-hbase-compat-2.4.0</artifactId>
   <name>Phoenix Hbase 2.4.0 compatibility</name>
-  <description>Compatibility module for HBase 2.4.0+</description>
+  <description>Compatibility module for HBase 2.4.0</description>
 
   <properties>
     <hbase24.compat.version>2.4.0</hbase24.compat.version>
@@ -96,6 +96,17 @@
       <artifactId>hbase-metrics-api</artifactId>
       <version>${hbase24.compat.version}</version>
       <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.slf4j</groupId>
+      <artifactId>slf4j-api</artifactId>
+      <version>${slf4j.version}</version>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>junit</groupId>
+      <artifactId>junit</artifactId>
+      <scope>test</scope>
     </dependency>
   </dependencies>
 

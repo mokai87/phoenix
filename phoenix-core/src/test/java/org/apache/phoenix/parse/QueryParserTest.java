@@ -899,4 +899,32 @@ public class QueryParserTest {
         parseQueryThatShouldFail("show tables in 'foo'");
         parseQueryThatShouldFail("show tables like foo");
     }
+
+    @Test
+    public void testCreateSchema() throws Exception {
+        String sql0 = "create schema \"schema1\"";
+        parseQuery(sql0);
+        String sql1 = "create schema schema1";
+        parseQuery(sql1);
+        String sql2 = "create schema \"default\"";
+        parseQuery(sql2);
+        String sql3 = "create schema \"DEFAULT\"";
+        parseQuery(sql3);
+    }
+
+    @Test
+    public void testShowCreateTable() throws Exception {
+        // Happy paths
+        parseQuery("SHOW CREATE TABLE FOO");
+        parseQuery("show create table FOO");
+        parseQuery("SHOW CREATE TABLE s.FOO");
+        parseQuery("SHOW CREATE TABLE \"foo\"");
+        parseQuery("SHOW CREATE TABLE s.\"foo\"");
+        parseQuery("SHOW CREATE TABLE \"s\".FOO");
+
+        // Expected failures.
+        parseQueryThatShouldFail("SHOW CREATE VIEW foo");
+        parseQueryThatShouldFail("SHOW CREATE TABLE 'foo'");
+
+    }
 }

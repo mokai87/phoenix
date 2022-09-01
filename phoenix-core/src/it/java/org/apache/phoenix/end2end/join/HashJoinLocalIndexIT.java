@@ -34,13 +34,15 @@ import java.util.Properties;
 import org.apache.phoenix.util.PropertiesUtil;
 import org.apache.phoenix.util.QueryUtil;
 import org.junit.Test;
+import org.junit.experimental.categories.Category;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
 import org.junit.runners.Parameterized.Parameters;
-
+import org.apache.phoenix.end2end.ParallelStatsDisabledTest;
 import org.apache.phoenix.thirdparty.com.google.common.collect.Lists;
 import org.apache.phoenix.thirdparty.com.google.common.collect.Maps;
 
+@Category(ParallelStatsDisabledTest.class)
 @RunWith(Parameterized.class)
 public class HashJoinLocalIndexIT extends HashJoinIT {
 
@@ -463,6 +465,7 @@ public class HashJoinLocalIndexIT extends HashJoinIT {
                  *     WHERE s.name = 'S1' AND i.name < 'T6'
                  */
                 "CLIENT PARALLEL 1-WAY RANGE SCAN OVER " + JOIN_SUPPLIER_TABLE_FULL_NAME + " [1,'S1']\n" + 
+                "    SERVER MERGE [0.PHONE]\n" +
                 "    SERVER FILTER BY FIRST KEY ONLY\n" + 
                 "CLIENT MERGE SORT\n" + 
                 "    PARALLEL INNER-JOIN TABLE 0\n" + 
@@ -479,6 +482,7 @@ public class HashJoinLocalIndexIT extends HashJoinIT {
                  *     GROUP BY phone
                  */
                 "CLIENT PARALLEL 1-WAY RANGE SCAN OVER " + JOIN_SUPPLIER_TABLE_FULL_NAME + " [1,'S1']\n" + 
+                "    SERVER MERGE [0.PHONE]\n" +
                 "    SERVER FILTER BY FIRST KEY ONLY\n" + 
                 "    SERVER AGGREGATE INTO DISTINCT ROWS BY [\"S.PHONE\"]\n" + 
                 "CLIENT MERGE SORT\n" + 
@@ -495,6 +499,7 @@ public class HashJoinLocalIndexIT extends HashJoinIT {
                  *     WHERE s.name <= 'S3'
                  */
                 "CLIENT PARALLEL 1-WAY RANGE SCAN OVER " + JOIN_SUPPLIER_TABLE_FULL_NAME + " [1,*] - [1,'S3']\n" +
+                "    SERVER MERGE [0.PHONE]\n" +
                 "    SERVER FILTER BY FIRST KEY ONLY\n" + 
                 "    SERVER AGGREGATE INTO SINGLE ROW\n" +
                 "    PARALLEL LEFT-JOIN TABLE 0\n" +

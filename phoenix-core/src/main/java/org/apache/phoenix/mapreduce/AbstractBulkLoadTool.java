@@ -27,13 +27,13 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 
-import org.apache.commons.cli.CommandLine;
-import org.apache.commons.cli.CommandLineParser;
-import org.apache.commons.cli.DefaultParser;
-import org.apache.commons.cli.HelpFormatter;
-import org.apache.commons.cli.Option;
-import org.apache.commons.cli.Options;
-import org.apache.commons.cli.ParseException;
+import org.apache.phoenix.thirdparty.org.apache.commons.cli.CommandLine;
+import org.apache.phoenix.thirdparty.org.apache.commons.cli.CommandLineParser;
+import org.apache.phoenix.thirdparty.org.apache.commons.cli.DefaultParser;
+import org.apache.phoenix.thirdparty.org.apache.commons.cli.HelpFormatter;
+import org.apache.phoenix.thirdparty.org.apache.commons.cli.Option;
+import org.apache.phoenix.thirdparty.org.apache.commons.cli.Options;
+import org.apache.phoenix.thirdparty.org.apache.commons.cli.ParseException;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.conf.Configured;
 import org.apache.hadoop.fs.Path;
@@ -88,6 +88,7 @@ public abstract class AbstractBulkLoadTool extends Configured implements Tool {
     static final Option IGNORE_ERRORS_OPT = new Option("g", "ignore-errors", false, "Ignore input errors");
     static final Option HELP_OPT = new Option("h", "help", false, "Show this help and quit");
     static final Option SKIP_HEADER_OPT = new Option("k", "skip-header", false, "Skip the first line of CSV files (the header)");
+    static final Option ENABLE_CORRUPT_INDEXES = new Option( "corruptindexes", "corruptindexes", false, "Allow bulk loading into non-empty tables with global secondary indexes");
 
     /**
      * Set configuration values based on parsed command line options.
@@ -112,6 +113,7 @@ public abstract class AbstractBulkLoadTool extends Configured implements Tool {
         options.addOption(IGNORE_ERRORS_OPT);
         options.addOption(HELP_OPT);
         options.addOption(SKIP_HEADER_OPT);
+        options.addOption(ENABLE_CORRUPT_INDEXES);
         return options;
     }
 
@@ -126,7 +128,10 @@ public abstract class AbstractBulkLoadTool extends Configured implements Tool {
 
         Options options = getOptions();
 
-        CommandLineParser parser = new DefaultParser();
+        CommandLineParser parser = DefaultParser.builder().
+                setAllowPartialMatching(false).
+                setStripLeadingAndTrailingQuotes(false).
+                build();
         CommandLine cmdLine = null;
         try {
             cmdLine = parser.parse(options, args);
@@ -181,40 +186,12 @@ public abstract class AbstractBulkLoadTool extends Configured implements Tool {
         return loadData(conf, cmdLine);
     }
 
-    /**
-     * Check schema or table name that start with two double quotes i.e ""t"" -> true
-     */
-    private boolean isStartWithTwoDoubleQuotes (String name) {
-        boolean start = false;
-        boolean end = false;
-        if (name != null && name.length() > 1) {
-             int length = name.length();
-             start = name.substring(0,2).equals("\"\"");
-             end =  name.substring(length-2, length).equals("\"\"");
-             if (start && !end) {
-                 throw new IllegalArgumentException("Invalid table/schema name " + name +
-                         ". Please check if name end with two double quotes.");
-             }
-        }
-        return start;
-    }
-
 
     private int loadData(Configuration conf, CommandLine cmdLine) throws Exception {
         String tableName = cmdLine.getOptionValue(TABLE_NAME_OPT.getOpt());
         String schemaName = cmdLine.getOptionValue(SCHEMA_NAME_OPT.getOpt());
         String indexTableName = cmdLine.getOptionValue(INDEX_TABLE_NAME_OPT.getOpt());
-        boolean quotedTableName = isStartWithTwoDoubleQuotes(tableName);
-        if (quotedTableName) {
-            // Commons-cli cannot parse full quoted argument i.e "t" (CLI-275).
-            // if \"\"t\"\" passed, then both pairs of quoted are left intact as ""t"".
-            // So remove one pair of quote from tablename ""t"" -> "t".
-            tableName = tableName.substring(1, tableName.length() - 1);
-        }
-        boolean quotedSchemaName = isStartWithTwoDoubleQuotes(schemaName);
-        if (quotedSchemaName) {
-            schemaName = schemaName.substring(1,schemaName.length() - 1);
-        }
+
         String qualifiedTableName = SchemaUtil.getQualifiedTableName(schemaName, tableName);
         String qualifiedIndexTableName = null;
         if (indexTableName != null){
@@ -254,6 +231,12 @@ public abstract class AbstractBulkLoadTool extends Configured implements Tool {
         configureOptions(cmdLine, importColumns, conf);
         String sName = SchemaUtil.normalizeIdentifier(schemaName);
         String tName = SchemaUtil.normalizeIdentifier(tableName);
+
+        String tn = SchemaUtil.getEscapedTableName(sName, tName);
+        ResultSet rsempty = conn.createStatement().executeQuery("SELECT * FROM " + tn + " LIMIT 1");
+        boolean tableNotEmpty = rsempty.next();
+        rsempty.close();
+
         try {
             validateTable(conn, sName, tName);
         } finally {
@@ -272,14 +255,26 @@ public abstract class AbstractBulkLoadTool extends Configured implements Tool {
         PTable table = PhoenixRuntime.getTable(conn, qualifiedTableName);
         tablesToBeLoaded.add(new TargetTableRef(qualifiedTableName, table.getPhysicalName().getString()));
         boolean hasLocalIndexes = false;
+        boolean hasGlobalIndexes = false;
         for(PTable index: table.getIndexes()) {
             if (index.getIndexType() == IndexType.LOCAL) {
                 hasLocalIndexes =
                         qualifiedIndexTableName == null ? true : index.getTableName().getString()
                                 .equals(qualifiedIndexTableName);
-                if (hasLocalIndexes) break;
+                if (hasLocalIndexes && hasGlobalIndexes) break;
+            }
+            if (index.getIndexType() == IndexType.GLOBAL) {
+                hasGlobalIndexes = true;
+                if (hasLocalIndexes && hasGlobalIndexes) break;
             }
         }
+
+        if(hasGlobalIndexes && tableNotEmpty && !cmdLine.hasOption(ENABLE_CORRUPT_INDEXES.getOpt())){
+            throw new IllegalStateException("Bulk Loading error: Bulk loading is disabled for non" +
+                    " empty tables with global indexes, because it will corrupt the global index table in most cases.\n" +
+                    "Use the --corruptindexes option to override this check.");
+        }
+
         // using conn after it's been closed... o.O
         tablesToBeLoaded.addAll(getIndexTables(conn, qualifiedTableName));
 

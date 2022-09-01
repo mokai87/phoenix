@@ -24,12 +24,13 @@ import java.util.Map;
 import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.phoenix.coprocessor.MetaDataRegionObserver;
+import org.apache.phoenix.end2end.NeedsOwnMiniClusterTest;
 import org.apache.phoenix.jdbc.PhoenixDatabaseMetaData;
 import org.apache.phoenix.query.QueryServices;
 import org.apache.phoenix.util.ReadOnlyProps;
 import org.apache.phoenix.util.SchemaUtil;
-import org.apache.phoenix.util.TestUtil;
 import org.junit.BeforeClass;
+import org.junit.experimental.categories.Category;
 import org.junit.runners.Parameterized.Parameters;
 
 import org.apache.phoenix.thirdparty.com.google.common.collect.Maps;
@@ -37,6 +38,7 @@ import org.apache.phoenix.thirdparty.com.google.common.collect.Maps;
 /*
  * This class is to ensure gets its own cluster with Namespace Enabled
  */
+@Category(NeedsOwnMiniClusterTest.class)
 public class MutableIndexFailureWithNamespaceIT extends MutableIndexFailureIT {
 
     public MutableIndexFailureWithNamespaceIT(String transactionProvider, boolean localIndex, boolean isNamespaceMapped,
@@ -62,21 +64,20 @@ public class MutableIndexFailureWithNamespaceIT extends MutableIndexFailureIT {
                 .findCoprocessorEnvironment(MetaDataRegionObserver.class.getName());
         MetaDataRegionObserver.initRebuildIndexConnectionProps(indexRebuildTaskRegionEnvironment.getConfiguration());
     }
-    
-    @Parameters(name = "MutableIndexFailureIT_transactional={0},localIndex={1},isNamespaceMapped={2},disableIndexOnWriteFailure={3},failRebuildTask={4},throwIndexWriteFailure={5}") // name is used by failsafe as file name in reports
+
+    // name is used by failsafe as file name in reports
+    @Parameters(name = "MutableIndexFailureIT_transactional={0},localIndex={1},isNamespaceMapped={2},disableIndexOnWriteFailure={3},failRebuildTask={4},throwIndexWriteFailure={5}")
     public static synchronized Collection<Object[]> data() {
-        return TestUtil.filterTxParamData(Arrays.asList(new Object[][] { 
-                // note - can't disableIndexOnWriteFailure without throwIndexWriteFailure, PHOENIX-4130
-                { null, false, true, true, false, null},
-                { null, false, true, true, false, true},
-                { "TEPHRA", false, true, true, false, null},
-                { "OMID", false, true, true, false, null},
-                { null, true, true, true, false, null},
-                { "TEPHRA", true, true, null, false, null},
-                { null, false, true, true, true, null},
-                { null, false, true, false, true, false},
-                } 
-        ),0);
+        return Arrays.asList(new Object[][] {
+            // Note: Can't disableIndexOnWriteFailure without throwIndexWriteFailure, PHOENIX-4130
+            { null, false, true, true, false, null},
+            { null, false, true, true, false, true},
+            // Note: OMID does not support local indexes
+            { "OMID", false, true, true, false, null},
+            { null, true, true, true, false, null},
+            { null, false, true, true, true, null},
+            { null, false, true, false, true, false},
+        });
     }
 
 }

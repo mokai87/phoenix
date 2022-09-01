@@ -66,7 +66,8 @@ public interface IndexCodec {
      * @return the pairs of (updates,index table name) that should be applied.
      * @throws IOException
      */
-    public Iterable<IndexUpdate> getIndexUpserts(TableState state, IndexMetaData context, byte[] regionStartKey, byte[] regionEndKey) throws IOException;
+    public Iterable<IndexUpdate> getIndexUpserts(TableState state, IndexMetaData context,
+            byte[] regionStartKey, byte[] regionEndKey, boolean verified) throws IOException;
 
     /**
      * This allows the codec to dynamically change whether or not indexing should take place for a table. If it doesn't
@@ -80,7 +81,6 @@ public interface IndexCodec {
      *            mutation that should be indexed.
      * @return <tt>true</tt> if indexing is enabled for the given table. This should be on a per-table basis, as each
      *         codec is instantiated per-region.
-     * @throws IOException
      */
     public boolean isEnabled(Mutation m);
 

@@ -20,12 +20,10 @@ package org.apache.phoenix.query;
 import static org.apache.phoenix.query.QueryServicesOptions.DEFAULT_SPOOL_DIRECTORY;
 import static org.apache.phoenix.query.QueryServicesOptions.withDefaults;
 
-import org.apache.phoenix.thirdparty.com.google.common.io.Files;
 import org.apache.hadoop.hbase.regionserver.wal.IndexedWALEditCodec;
 import org.apache.phoenix.util.PhoenixRuntime;
 import org.apache.phoenix.util.ReadOnlyProps;
-import org.apache.tephra.TxConstants;
-
+import org.apache.phoenix.util.TestUtil;
 
 /**
  * QueryServices implementation to use for tests that do not execute queries
@@ -88,6 +86,12 @@ public final class QueryServicesTestImpl extends BaseQueryServicesImpl {
     }
     
     private static QueryServicesOptions getDefaultServicesOptions() {
+        String txSnapshotDir;
+        try {
+            txSnapshotDir = TestUtil.createTempDirectory().toString();
+        } catch (Exception e) {
+            throw new RuntimeException("Could not create tx snapshot directory", e);
+        }
     	return withDefaults()
     	        .setSequenceCacheSize(DEFAULT_SEQUENCE_CACHE_SIZE)
     	        .setTransactionsEnabled(DEFAULT_TRANSACTIONS_ENABLED)
@@ -124,14 +128,6 @@ public final class QueryServicesTestImpl extends BaseQueryServicesImpl {
                 .setDefaultIndexPopulationWaitTime(DEFAULT_INDEX_POPULATION_WAIT_TIME)
                 .setIndexRebuildTaskInitialDelay(DEFAULT_INDEX_REBUILD_TASK_INITIAL_DELAY)
                 .set(AGGREGATE_CHUNK_SIZE_INCREASE_ATTRIB, DEFAULT_AGGREGATE_CHUNK_SIZE_INCREASE)
-                // setup default test configs for Tephra
-                .set(TxConstants.Manager.CFG_DO_PERSIST, false)
-                .set(TxConstants.Service.CFG_DATA_TX_CLIENT_RETRY_STRATEGY, "n-times")
-                .set(TxConstants.Service.CFG_DATA_TX_CLIENT_ATTEMPTS, 1)
-                .set(TxConstants.Service.CFG_DATA_TX_CLIENT_DISCOVERY_TIMEOUT_SEC, 60)
-                .set(TxConstants.Manager.CFG_TX_SNAPSHOT_DIR, Files.createTempDir().getAbsolutePath())
-                .set(TxConstants.Manager.CFG_TX_TIMEOUT, DEFAULT_TXN_TIMEOUT_SECONDS)
-                .set(TxConstants.Manager.CFG_TX_SNAPSHOT_INTERVAL, 5L)
                 ;
     }
     

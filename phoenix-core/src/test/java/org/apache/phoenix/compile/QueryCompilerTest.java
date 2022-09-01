@@ -59,7 +59,6 @@ import org.apache.phoenix.exception.SQLExceptionCode;
 import org.apache.phoenix.execute.AggregatePlan;
 import org.apache.phoenix.execute.ClientAggregatePlan;
 import org.apache.phoenix.execute.ClientScanPlan;
-import org.apache.phoenix.execute.CorrelatePlan;
 import org.apache.phoenix.execute.CursorFetchPlan;
 import org.apache.phoenix.execute.HashJoinPlan;
 import org.apache.phoenix.execute.HashJoinPlan.HashSubPlan;
@@ -631,6 +630,7 @@ public class QueryCompilerTest extends BaseConnectionlessQueryTest {
 
     @Test
     public void testUpsertMultiByteIntoChar() throws Exception {
+        String value = "繰り返し曜日マスク";
         try {
             // Select non agg column in aggregate query
             String query = "upsert into ATABLE VALUES (?, ?, ?)";
@@ -639,7 +639,7 @@ public class QueryCompilerTest extends BaseConnectionlessQueryTest {
             try {
                 PreparedStatement statement = conn.prepareStatement(query);
                 statement.setString(1, "00D300000000XHP");
-                statement.setString(2, "繰り返し曜日マスク");
+                statement.setString(2, value);
                 statement.setInt(3, 1);
                 statement.executeUpdate();
                 fail();
@@ -649,6 +649,7 @@ public class QueryCompilerTest extends BaseConnectionlessQueryTest {
         } catch (SQLException e) {
             assertTrue(e.getMessage(), e.getMessage().contains("ERROR 201 (22000): Illegal data."));
             assertTrue(e.getMessage().contains("CHAR types may only contain single byte characters"));
+            assertFalse(e.getMessage().contains(value));
         }
     }
 
@@ -2851,21 +2852,6 @@ public class QueryCompilerTest extends BaseConnectionlessQueryTest {
             fail();
         } catch (SQLException e) {
             assertEquals(SQLExceptionCode.CANNOT_USE_ON_DUP_KEY_FOR_IMMUTABLE.getErrorCode(), e.getErrorCode());
-        } finally {
-            conn.close();
-        }
-    }
-
-    @Test
-    public void testOnDupKeyWithGlobalIndex() throws Exception {
-        Connection conn = DriverManager.getConnection(getUrl());
-        try {
-            conn.createStatement().execute("CREATE TABLE t1 (k integer not null primary key, v bigint)");
-            conn.createStatement().execute("CREATE INDEX idx ON t1 (v)");
-            conn.createStatement().execute("UPSERT INTO t1 VALUES(0,0) ON DUPLICATE KEY UPDATE v = v + 1");
-            fail();
-        } catch (SQLException e) {
-            assertEquals(SQLExceptionCode.CANNOT_USE_ON_DUP_KEY_WITH_GLOBAL_IDX.getErrorCode(), e.getErrorCode());
         } finally {
             conn.close();
         }
@@ -5238,11 +5224,6 @@ public class QueryCompilerTest extends BaseConnectionlessQueryTest {
         }
 
         @Override
-        public List<QueryPlan> visit(CorrelatePlan plan) {
-            return Collections.emptyList();
-        }
-
-        @Override
         public List<QueryPlan> visit(CursorFetchPlan plan) {
             return Collections.emptyList();
         }
@@ -6553,7 +6534,7 @@ public class QueryCompilerTest extends BaseConnectionlessQueryTest {
 
             }
 
-          //test Correlated subquery with AggregateFunction with groupBy and is ORed part of the where clause.
+            //test Correlated subquery with AggregateFunction with groupBy and is ORed part of the where clause.
             sql= "SELECT item_id, name FROM " + itemTableName + " i WHERE i.item_id IN "+
                     "(SELECT max(item_id) FROM " + orderTableName + " o  where o.price = i.price group by o.customer_id) or i.discount1 > 10 ORDER BY name";
             queryPlan= TestUtil.getOptimizeQueryPlanNoIterator(conn, sql);
@@ -6763,7 +6744,8 @@ public class QueryCompilerTest extends BaseConnectionlessQueryTest {
            scanPlan=(ScanPlan)(hashJoinPlan.getDelegate());
            TestUtil.assertSelectStatement(
                    scanPlan.getStatement(),
-                   "SELECT A.AID FROM " + tableName1 + "  WHERE (AGE > (SELECT  MAX(CODE) FROM " + tableName2 + " C  WHERE C.BID >= 1 LIMIT 2) AND (AGE >= 11 AND AGE <= 33)) ORDER BY A.AID");
+                   "SELECT A.AID FROM " + tableName1 +
+                   "  WHERE (AGE > (SELECT  MAX(CODE) FROM " + tableName2 + " C  WHERE C.BID >= 1 LIMIT 2) AND (AGE >= 11 AND AGE <= 33)) ORDER BY A.AID");
            subPlans = hashJoinPlan.getSubPlans();
            assertTrue(subPlans.length == 2);
            assertTrue(subPlans[0] instanceof WhereClauseSubPlan);
@@ -6792,4 +6774,117 @@ public class QueryCompilerTest extends BaseConnectionlessQueryTest {
             conn.close();
         }
     }
+
+    @Test
+    public void testExistsSubqueryBug6498() throws Exception {
+        Connection conn = null;
+        try {
+            conn = DriverManager.getConnection(getUrl());
+            String itemTableName = "item_table";
+            String sql ="create table " + itemTableName +
+                "   (item_id varchar not null primary key, " +
+                "    name varchar, " +
+                "    price integer, " +
+                "    discount1 integer, " +
+                "    discount2 integer, " +
+                "    supplier_id varchar, " +
+                "    description varchar)";
+            conn.createStatement().execute(sql);
+
+            String orderTableName = "order_table";
+            sql = "create table " + orderTableName +
+                "   (order_id varchar not null primary key, " +
+                "    customer_id varchar, " +
+                "    item_id varchar, " +
+                "    price integer, " +
+                "    quantity integer, " +
+                "    date timestamp)";
+            conn.createStatement().execute(sql);
+
+            //test simple Correlated subquery
+            ParseNodeFactory.setTempAliasCounterValue(0);
+            sql= "SELECT item_id, name FROM " + itemTableName + " i WHERE exists "+
+                 "(SELECT 1 FROM " + orderTableName + " o  where o.price = i.price and o.quantity = 5 ) ORDER BY name";
+            QueryPlan queryPlan = TestUtil.getOptimizeQueryPlanNoIterator(conn, sql);
+            assertTrue(queryPlan instanceof HashJoinPlan);
+            System.out.println(queryPlan.getStatement());
+            TestUtil.assertSelectStatement(
+                    queryPlan.getStatement(),
+                    "SELECT ITEM_ID,NAME FROM ITEM_TABLE I  Semi JOIN " +
+                    "(SELECT DISTINCT 1 $3,O.PRICE $2 FROM ORDER_TABLE O  WHERE O.QUANTITY = 5) $1 "+
+                    "ON ($1.$2 = I.PRICE) ORDER BY NAME");
+
+            //test Correlated subquery with AggregateFunction and groupBy
+            ParseNodeFactory.setTempAliasCounterValue(0);
+            sql= "SELECT item_id, name FROM " + itemTableName + " i WHERE exists "+
+                 "(SELECT 1 FROM " + orderTableName + " o  where o.item_id = i.item_id group by customer_id having count(order_id) > 1) " +
+                 "ORDER BY name";
+            queryPlan = TestUtil.getOptimizeQueryPlanNoIterator(conn, sql);
+            assertTrue(queryPlan instanceof HashJoinPlan);
+            TestUtil.assertSelectStatement(
+                    queryPlan.getStatement(),
+                    "SELECT ITEM_ID,NAME FROM ITEM_TABLE I  Semi JOIN " +
+                    "(SELECT DISTINCT 1 $3,O.ITEM_ID $2 FROM ORDER_TABLE O  GROUP BY O.ITEM_ID,CUSTOMER_ID HAVING  COUNT(ORDER_ID) > 1) $1 " +
+                    "ON ($1.$2 = I.ITEM_ID) ORDER BY NAME");
+
+            //for Correlated subquery, the extracted join condition must be equal expression.
+            sql= "SELECT item_id, name FROM " + itemTableName + " i WHERE exists "+
+                    "(SELECT 1 FROM " + orderTableName + " o  where o.price = i.price or o.quantity > 1 group by o.customer_id) ORDER BY name";
+            try {
+                queryPlan= TestUtil.getOptimizeQueryPlanNoIterator(conn, sql);
+                fail();
+            } catch(SQLFeatureNotSupportedException exception) {
+
+            }
+
+            //test Correlated subquery with AggregateFunction with groupBy and is ORed part of the where clause.
+            ParseNodeFactory.setTempAliasCounterValue(0);
+            sql= "SELECT item_id, name FROM " + itemTableName + " i WHERE exists "+
+                 "(SELECT 1 FROM " + orderTableName + " o  where o.item_id = i.item_id group by customer_id having count(order_id) > 1) "+
+                 " or i.discount1 > 10 ORDER BY name";
+            queryPlan= TestUtil.getOptimizeQueryPlanNoIterator(conn, sql);
+            assertTrue(queryPlan instanceof HashJoinPlan);
+            TestUtil.assertSelectStatement(
+                    queryPlan.getStatement(),
+                    "SELECT ITEM_ID,NAME FROM ITEM_TABLE I  Left JOIN " +
+                    "(SELECT DISTINCT 1 $3,O.ITEM_ID $2 FROM ORDER_TABLE O  GROUP BY O.ITEM_ID,CUSTOMER_ID HAVING  COUNT(ORDER_ID) > 1) $1 " +
+                    "ON ($1.$2 = I.ITEM_ID) WHERE ($1.$3 IS NOT NULL  OR I.DISCOUNT1 > 10) ORDER BY NAME");
+
+            // test NonCorrelated subquery
+            ParseNodeFactory.setTempAliasCounterValue(0);
+            sql= "SELECT item_id, name FROM " + itemTableName + " i WHERE exists "+
+                    "(SELECT 1 FROM " + orderTableName + " o  where o.price > 8) ORDER BY name";
+            queryPlan= TestUtil.getOptimizeQueryPlanNoIterator(conn, sql);
+            assertTrue(queryPlan instanceof HashJoinPlan);
+            System.out.println(queryPlan.getStatement());
+            TestUtil.assertSelectStatement(
+                    queryPlan.getStatement(),
+                    "SELECT ITEM_ID,NAME FROM ITEM_TABLE I  WHERE  EXISTS (SELECT 1 FROM ORDER_TABLE O  WHERE O.PRICE > 8 LIMIT 1) ORDER BY NAME");
+
+            sql= "SELECT item_id, name FROM " + itemTableName + " i WHERE exists "+
+                 "(SELECT 1 FROM " + orderTableName + " o  where o.price > 8 group by o.customer_id,o.item_id having count(order_id) > 1)" +
+                 " ORDER BY name";
+            queryPlan= TestUtil.getOptimizeQueryPlanNoIterator(conn, sql);
+            assertTrue(queryPlan instanceof HashJoinPlan);
+            TestUtil.assertSelectStatement(
+                    queryPlan.getStatement(),
+                    "SELECT ITEM_ID,NAME FROM ITEM_TABLE I  WHERE  EXISTS "+
+                    "(SELECT 1 FROM ORDER_TABLE O  WHERE O.PRICE > 8 GROUP BY O.CUSTOMER_ID,O.ITEM_ID HAVING  COUNT(ORDER_ID) > 1 LIMIT 1)" +
+                    " ORDER BY NAME");
+
+            sql= "SELECT item_id, name FROM " + itemTableName + " i WHERE exists "+
+                 "(SELECT 1 FROM " + orderTableName + " o  where o.price > 8 group by o.customer_id,o.item_id having count(order_id) > 1)" +
+                 " or i.discount1 > 10 ORDER BY name";
+            queryPlan= TestUtil.getOptimizeQueryPlanNoIterator(conn, sql);
+            assertTrue(queryPlan instanceof HashJoinPlan);
+            TestUtil.assertSelectStatement(
+                    queryPlan.getStatement(),
+                    "SELECT ITEM_ID,NAME FROM ITEM_TABLE I  WHERE " +
+                    "( EXISTS (SELECT 1 FROM ORDER_TABLE O  WHERE O.PRICE > 8 GROUP BY O.CUSTOMER_ID,O.ITEM_ID HAVING  COUNT(ORDER_ID) > 1 LIMIT 1)" +
+                    " OR I.DISCOUNT1 > 10) ORDER BY NAME");
+        } finally {
+            conn.close();
+        }
+    }
+
 }

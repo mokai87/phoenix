@@ -30,8 +30,10 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.TreeSet;
 
+import org.apache.phoenix.thirdparty.com.google.common.collect.Lists;
 import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.CellUtil;
 import org.apache.hadoop.hbase.KeyValue;
@@ -88,6 +90,11 @@ public class IndexRepairRegionScanner extends GlobalIndexRegionScanner {
                      HBaseFactoryProvider.getHConnectionFactory().createConnection(env.getConfiguration())) {
             regionEndKeys = connection.getRegionLocator(dataHTable.getName()).getEndKeys();
         }
+    }
+
+    @Override
+    public byte[] getDataTableName() {
+        return dataHTable.getName().toBytes();
     }
 
     public void prepareExpectedIndexMutations(Result dataRow, Map<byte[], List<Mutation>> expectedIndexMutationMap) throws IOException {
@@ -176,6 +183,28 @@ public class IndexRepairRegionScanner extends GlobalIndexRegionScanner {
         return actualIndexMutationMap;
     }
 
+    private Map<byte[], List<Mutation>> populateActualIndexMutationMap() throws IOException {
+        Map<byte[], List<Mutation>> actualIndexMutationMap = Maps.newTreeMap(Bytes.BYTES_COMPARATOR);
+        Scan indexScan = new Scan();
+        indexScan.setTimeRange(scan.getTimeRange().getMin(), scan.getTimeRange().getMax());
+        indexScan.setRaw(true);
+        indexScan.setMaxVersions();
+        indexScan.setCacheBlocks(false);
+        try (RegionScanner regionScanner = region.getScanner(indexScan)) {
+            do {
+                ungroupedAggregateRegionObserver.checkForRegionClosingOrSplitting();
+                List<Cell> row = new ArrayList<Cell>();
+                hasMore = regionScanner.nextRaw(row);
+                if (!row.isEmpty()) {
+                    populateIndexMutationFromIndexRow(row, actualIndexMutationMap);
+                }
+            } while (hasMore);
+        } catch (Throwable t) {
+            ServerUtil.throwIOException(region.getRegionInfo().getRegionNameAsString(), t);
+        }
+        return actualIndexMutationMap;
+    }
+
     private void repairAndOrVerifyIndexRows(Set<byte[]> dataRowKeys,
                                             Map<byte[], List<Mutation>> actualIndexMutationMap,
                                             IndexToolVerificationResult verificationResult) throws IOException {
@@ -186,7 +215,7 @@ public class IndexRepairRegionScanner extends GlobalIndexRegionScanner {
             return;
         }
         if (verifyType == IndexTool.IndexVerifyType.ONLY) {
-            verifyIndexRows(actualIndexMutationMap, expectedIndexMutationMap, Collections.EMPTY_SET, Collections.EMPTY_LIST, verificationResult.getBefore(), true);
+            verifyIndexRows(actualIndexMutationMap, expectedIndexMutationMap, Collections.EMPTY_SET, indexRowsToBeDeleted, verificationResult.getBefore(), true);
             return;
         }
         if (verifyType == IndexTool.IndexVerifyType.BEFORE) {
@@ -198,11 +227,12 @@ public class IndexRepairRegionScanner extends GlobalIndexRegionScanner {
         }
         if (verifyType == IndexTool.IndexVerifyType.AFTER) {
             repairIndexRows(expectedIndexMutationMap, Collections.EMPTY_LIST, verificationResult);
-            verifyIndexRows(actualIndexMutationMap, expectedIndexMutationMap, Collections.EMPTY_SET, Collections.EMPTY_LIST, verificationResult.getAfter(), false);
+            actualIndexMutationMap = populateActualIndexMutationMap();
+            verifyIndexRows(actualIndexMutationMap, expectedIndexMutationMap, Collections.EMPTY_SET, indexRowsToBeDeleted, verificationResult.getAfter(), false);
             return;
         }
         if (verifyType == IndexTool.IndexVerifyType.BOTH) {
-            verifyIndexRows(actualIndexMutationMap,expectedIndexMutationMap, Collections.EMPTY_SET, indexRowsToBeDeleted, verificationResult.getBefore(), true);
+            verifyIndexRows(actualIndexMutationMap, expectedIndexMutationMap, Collections.EMPTY_SET, indexRowsToBeDeleted, verificationResult.getBefore(), true);
             if (!expectedIndexMutationMap.isEmpty() || !indexRowsToBeDeleted.isEmpty()) {
                 repairIndexRows(expectedIndexMutationMap, indexRowsToBeDeleted, verificationResult);
             }
@@ -249,6 +279,7 @@ public class IndexRepairRegionScanner extends GlobalIndexRegionScanner {
             regionIndex++;
         }
         for (byte[] dataRowKey: dataRowKeys) {
+            indexKey = dataRowKey;
             if (perTaskDataRowKeys.size() == maxSetSize ||
                     (regionIndex < regionCount - 1 && Bytes.BYTES_COMPARATOR.compare(indexKey, endKeys[regionIndex]) > 0)) {
                 perTaskDataRowKeys = new TreeSet<>(Bytes.BYTES_COMPARATOR);
@@ -272,6 +303,33 @@ public class IndexRepairRegionScanner extends GlobalIndexRegionScanner {
         return dataRowKeys;
     }
 
+    /**
+     * @param indexMutationMap actual index mutations for a page
+     * @param dataRowKeysSetList List of per-task data row keys
+     * @return For each set of data row keys, split the acutal index mutation map into
+     * a per-task index mutation map and return the list of all index mutation maps.
+     */
+    private List<Map<byte[], List<Mutation>>> getPerTaskIndexMutationMap(
+            Map<byte[], List<Mutation>> indexMutationMap, List<Set<byte[]>> dataRowKeysSetList) {
+        List<Map<byte[], List<Mutation>>> mapList = Lists.newArrayListWithExpectedSize(dataRowKeysSetList.size());
+        for (int i = 0; i < dataRowKeysSetList.size(); ++i) {
+            Map<byte[], List<Mutation>> perTaskIndexMutationMap = new TreeMap<>(Bytes.BYTES_COMPARATOR);
+            mapList.add(perTaskIndexMutationMap);
+        }
+        for (Map.Entry<byte[], List<Mutation>> entry : indexMutationMap.entrySet()) {
+            byte[] indexRowKey = entry.getKey();
+            List<Mutation> actualMutationList = entry.getValue();
+            byte[] dataRowKey = indexMaintainer.buildDataRowKey(new ImmutableBytesWritable(indexRowKey), viewConstants);
+            for (int i = 0; i < dataRowKeysSetList.size(); ++i) {
+                if (dataRowKeysSetList.get(i).contains(dataRowKey)) {
+                    mapList.get(i).put(indexRowKey, actualMutationList);
+                    break;
+                }
+            }
+        }
+        return mapList;
+    }
+
     private void verifyAndOrRepairIndex(Map<byte[], List<Mutation>> actualIndexMutationMap) throws IOException {
         if (actualIndexMutationMap.size() == 0) {
             return;
@@ -279,13 +337,14 @@ public class IndexRepairRegionScanner extends GlobalIndexRegionScanner {
         Set<byte[]> dataRowKeys = getDataRowKeys(actualIndexMutationMap);
         List<Set<byte[]>> setList = getPerTaskDataRowKeys((TreeSet<byte[]>) dataRowKeys,
                 regionEndKeys, rowCountPerTask);
+        List<Map<byte[], List<Mutation>>> indexMutationMapList = getPerTaskIndexMutationMap(actualIndexMutationMap, setList);
         int taskCount = setList.size();
         TaskBatch<Boolean> tasks = new TaskBatch<>(taskCount);
         List<IndexToolVerificationResult> verificationResultList = new ArrayList<>(taskCount);
         for (int i = 0; i < taskCount; i++) {
             IndexToolVerificationResult perTaskVerificationResult = new IndexToolVerificationResult(scan);
             verificationResultList.add(perTaskVerificationResult);
-            addRepairAndOrVerifyTask(tasks, setList.get(i), actualIndexMutationMap, perTaskVerificationResult);
+            addRepairAndOrVerifyTask(tasks, setList.get(i), indexMutationMapList.get(i), perTaskVerificationResult);
         }
         submitTasks(tasks);
         if (verify) {
