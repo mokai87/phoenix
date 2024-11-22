@@ -17,9 +17,11 @@
  */
 package org.apache.phoenix.end2end;
 
+import static org.apache.hadoop.hbase.coprocessor.CoprocessorHost.REGIONSERVER_COPROCESSOR_CONF_KEY;
 import static org.apache.phoenix.jdbc.PhoenixDatabaseMetaData.SYSTEM_CATALOG_SCHEMA;
 import static org.apache.phoenix.jdbc.PhoenixDatabaseMetaData.SYSTEM_MUTEX_FAMILY_NAME_BYTES;
 import static org.apache.phoenix.jdbc.PhoenixDatabaseMetaData.SYSTEM_MUTEX_HBASE_TABLE_NAME;
+import static org.apache.phoenix.jdbc.PhoenixDatabaseMetaData.SYSTEM_MUTEX_NAME;
 import static org.apache.phoenix.jdbc.PhoenixDatabaseMetaData.TTL_FOR_MUTEX;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -43,22 +45,24 @@ import java.util.concurrent.TimeoutException;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
-import org.apache.hadoop.hbase.HColumnDescriptor;
 import org.apache.hadoop.hbase.HConstants;
-import org.apache.hadoop.hbase.HTableDescriptor;
 import org.apache.hadoop.hbase.NamespaceNotFoundException;
 import org.apache.hadoop.hbase.TableName;
-import org.apache.hadoop.hbase.client.HBaseAdmin;
-import org.apache.hadoop.hbase.ipc.HBaseRpcController;
+import org.apache.hadoop.hbase.client.Admin;
+import org.apache.hadoop.hbase.client.ColumnFamilyDescriptor;
+import org.apache.hadoop.hbase.client.TableDescriptor;
 import org.apache.hadoop.hbase.ipc.ServerRpcController;
 import org.apache.hadoop.hbase.ipc.controller.ServerToServerRpcController;
+import org.apache.phoenix.cache.ServerMetadataCacheImpl;
+import org.apache.phoenix.coprocessor.PhoenixRegionServerEndpoint;
+import org.apache.phoenix.coprocessorclient.MetaDataProtocol;
 import org.apache.phoenix.compat.hbase.CompatUtil;
-import org.apache.phoenix.coprocessor.MetaDataProtocol;
+import org.apache.phoenix.coprocessor.BaseScannerRegionObserver;
 import org.apache.phoenix.exception.SQLExceptionCode;
 import org.apache.phoenix.exception.UpgradeRequiredException;
+import org.apache.phoenix.jdbc.ConnectionInfo;
 import org.apache.phoenix.jdbc.PhoenixConnection;
 import org.apache.phoenix.jdbc.PhoenixDriver;
-import org.apache.phoenix.jdbc.PhoenixEmbeddedDriver;
 import org.apache.phoenix.jdbc.PhoenixTestDriver;
 import org.apache.phoenix.query.BaseTest;
 import org.apache.phoenix.query.ConnectionQueryServices;
@@ -66,11 +70,14 @@ import org.apache.phoenix.query.ConnectionQueryServicesImpl;
 import org.apache.phoenix.query.QueryConstants;
 import org.apache.phoenix.query.QueryServices;
 import org.apache.phoenix.query.QueryServicesTestImpl;
+import org.apache.phoenix.schema.PTableKey;
+import org.apache.phoenix.thirdparty.com.google.common.collect.Maps;
 import org.apache.phoenix.util.QueryUtil;
 import org.apache.phoenix.util.ReadOnlyProps;
 import org.apache.phoenix.util.UpgradeUtil;
 import org.junit.After;
 import org.junit.Before;
+import org.junit.BeforeClass;
 import org.junit.Ignore;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
@@ -104,16 +111,18 @@ public class SystemTablesCreationOnConnectionIT {
 
     private static final Set<String> PHOENIX_SYSTEM_TABLES = new HashSet<>(Arrays.asList(
             "SYSTEM.CATALOG", "SYSTEM.SEQUENCE", "SYSTEM.STATS", "SYSTEM.FUNCTION",
-            "SYSTEM.MUTEX", "SYSTEM.LOG", "SYSTEM.CHILD_LINK", "SYSTEM.TASK","SYSTEM.TRANSFORM"));
+            "SYSTEM.MUTEX", "SYSTEM.LOG", "SYSTEM.CHILD_LINK", "SYSTEM.TASK","SYSTEM.TRANSFORM",
+            "SYSTEM.CDC_STREAM_STATUS", "SYSTEM.CDC_STREAM"));
 
     private static final Set<String> PHOENIX_NAMESPACE_MAPPED_SYSTEM_TABLES = new HashSet<>(
             Arrays.asList("SYSTEM:CATALOG", "SYSTEM:SEQUENCE", "SYSTEM:STATS", "SYSTEM:FUNCTION",
-                    "SYSTEM:MUTEX", "SYSTEM:LOG", "SYSTEM:CHILD_LINK", "SYSTEM:TASK", "SYSTEM:TRANSFORM"));
+                    "SYSTEM:MUTEX", "SYSTEM:LOG", "SYSTEM:CHILD_LINK", "SYSTEM:TASK", "SYSTEM:TRANSFORM",
+                    "SYSTEM:CDC_STREAM_STATUS", "SYSTEM:CDC_STREAM"));
 
     private static class PhoenixSysCatCreationServices extends ConnectionQueryServicesImpl {
 
         PhoenixSysCatCreationServices(QueryServices services,
-                                      PhoenixEmbeddedDriver.ConnectionInfo connectionInfo, Properties info) {
+                                      ConnectionInfo connectionInfo, Properties info) {
             super(services, connectionInfo, info);
         }
 
@@ -157,9 +166,9 @@ public class SystemTablesCreationOnConnectionIT {
         @Override // public for testing
         public synchronized ConnectionQueryServices getConnectionQueryServices(String url,
                                                                                Properties info) throws SQLException {
+            QueryServicesTestImpl qsti = new QueryServicesTestImpl(getDefaultProps(), overrideProps);
             if (cqs == null) {
-                cqs = new PhoenixSysCatCreationServices(new QueryServicesTestImpl(getDefaultProps(),
-                        overrideProps), ConnectionInfo.create(url), info);
+                cqs = new PhoenixSysCatCreationServices(qsti, ConnectionInfo.create(url, qsti.getProps(), info), info);
                 cqs.init(url, info);
             }
             return cqs;
@@ -176,6 +185,10 @@ public class SystemTablesCreationOnConnectionIT {
         }
     }
 
+    @BeforeClass
+    public static synchronized void registerTestDriver() throws SQLException {
+        DriverManager.registerDriver(new PhoenixTestDriver());
+    }
     @Before
     public void resetVariables() {
         setOldTimestampToInduceUpgrade = false;
@@ -194,6 +207,7 @@ public class SystemTablesCreationOnConnectionIT {
                     refCountLeaked = BaseTest.isAnyStoreRefCountLeaked(testUtil.getAdmin());
                 }
                 testUtil.shutdownMiniCluster();
+                ServerMetadataCacheTestImpl.resetCache();
                 testUtil = null;
                 assertFalse("refCount leaked", refCountLeaked);
             }
@@ -556,9 +570,9 @@ public class SystemTablesCreationOnConnectionIT {
         DriverManager.registerDriver(PhoenixDriver.INSTANCE);
         startMiniClusterWithToggleNamespaceMapping(Boolean.FALSE.toString());
         try (Connection ignored = DriverManager.getConnection(getJdbcUrl());
-             HBaseAdmin admin = testUtil.getHBaseAdmin()) {
-            HTableDescriptor htd = admin.getTableDescriptor(SYSTEM_MUTEX_HBASE_TABLE_NAME);
-            HColumnDescriptor hColDesc = htd.getFamily(SYSTEM_MUTEX_FAMILY_NAME_BYTES);
+             Admin admin = testUtil.getAdmin()) {
+            TableDescriptor htd = admin.getDescriptor(SYSTEM_MUTEX_HBASE_TABLE_NAME);
+            ColumnFamilyDescriptor hColDesc = htd.getColumnFamily(SYSTEM_MUTEX_FAMILY_NAME_BYTES);
             assertEquals("Did not find the correct TTL for SYSTEM.MUTEX", TTL_FOR_MUTEX,
                     hColDesc.getTimeToLive());
         }
@@ -645,9 +659,9 @@ public class SystemTablesCreationOnConnectionIT {
                 getJdbcUrl(), new Properties()).connect(getJdbcUrl(), new Properties())) {
             // do nothing
         }
-        HTableDescriptor descriptor = testUtil.getHBaseAdmin()
-                .getTableDescriptor(TableName.valueOf(PHOENIX_SYSTEM_CATALOG));
-        return descriptor.getFamily(QueryConstants.DEFAULT_COLUMN_FAMILY_BYTES).getMaxVersions();
+        TableDescriptor descriptor = testUtil.getAdmin()
+                .getDescriptor(TableName.valueOf(PHOENIX_SYSTEM_CATALOG));
+        return descriptor.getColumnFamily(QueryConstants.DEFAULT_COLUMN_FAMILY_BYTES).getMaxVersions();
     }
 
     /**
@@ -663,6 +677,7 @@ public class SystemTablesCreationOnConnectionIT {
         conf.set(QueryServices.IS_NAMESPACE_MAPPING_ENABLED, isNamespaceMappingEnabled);
         // Avoid multiple clusters trying to bind to the master's info port (16010)
         conf.setInt(HConstants.MASTER_INFO_PORT, -1);
+        conf.set(REGIONSERVER_COPROCESSOR_CONF_KEY, PhoenixRegionServerEndpointTestImpl.class.getName());
         testUtil.startMiniCluster(1);
     }
 

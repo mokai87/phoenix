@@ -78,6 +78,7 @@ public class IndexUtilTest {
              + "UNSIGNED_TINYINT ARRAY=UNSIGNED_TINYINT ARRAY, "
              + "VARBINARY=VARBINARY, "
              + "VARBINARY ARRAY=VARBINARY ARRAY, "
+             + "VARBINARY_ENCODED=VARBINARY_ENCODED, "
              + "VARCHAR=VARCHAR, "
              + "VARCHAR ARRAY=VARCHAR ARRAY}");
     }
@@ -131,6 +132,7 @@ public class IndexUtilTest {
              + "UNSIGNED_TINYINT ARRAY=UNSIGNED_TINYINT ARRAY, "
              + "VARBINARY=VARBINARY, "
              + "VARBINARY ARRAY=VARBINARY ARRAY, "
+             + "VARBINARY_ENCODED=VARBINARY_ENCODED, "
              + "VARCHAR=VARCHAR, "
              + "VARCHAR ARRAY=VARCHAR ARRAY}");
     }
@@ -138,6 +140,10 @@ public class IndexUtilTest {
     private void verifyIndexColumnDataTypes(boolean isNullable, String expected) {
         Map<String, String> indexColumnDataTypes = Maps.newTreeMap();
         for (PDataType dataType : PDataTypeFactory.getInstance().getTypes()) {
+            if (!dataType.isComparisonSupported()) {
+                // JSON Datatype can't be an IndexColumn
+                continue;
+            }
             String indexColumnDataType = "unsupported";
             try {
                 indexColumnDataType = IndexUtil.getIndexColumnDataType(isNullable, dataType).toString();

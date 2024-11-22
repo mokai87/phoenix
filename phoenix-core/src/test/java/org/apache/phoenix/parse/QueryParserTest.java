@@ -19,6 +19,7 @@ package org.apache.phoenix.parse;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
@@ -26,12 +27,15 @@ import java.io.IOException;
 import java.io.StringReader;
 import java.sql.SQLException;
 import java.sql.SQLFeatureNotSupportedException;
+import java.util.Arrays;
+import java.util.HashSet;
 import java.util.List;
 
 import org.apache.hadoop.hbase.util.Pair;
 import org.apache.phoenix.exception.PhoenixParserException;
 import org.apache.phoenix.exception.SQLExceptionCode;
 import org.apache.phoenix.jdbc.PhoenixStatement.Operation;
+import org.apache.phoenix.schema.PTable;
 import org.apache.phoenix.schema.SortOrder;
 import org.junit.Test;
 
@@ -39,12 +43,12 @@ import org.apache.phoenix.thirdparty.com.google.common.base.Joiner;
 
 
 public class QueryParserTest {
-    private void parseQuery(String sql) throws IOException, SQLException {
+    private <T extends BindableStatement> T parseQuery(String sql, Class<T> type) throws IOException, SQLException {
         SQLParser parser = new SQLParser(new StringReader(sql));
         BindableStatement stmt = null;
         stmt = parser.parseStatement();
         if (stmt.getOperation() != Operation.QUERY) {
-            return;
+            return type != null ? type.cast(stmt) : null;
         }
         String newSQL = stmt.toString();
         SQLParser newParser = new SQLParser(new StringReader(newSQL));
@@ -55,6 +59,11 @@ public class QueryParserTest {
             fail("Unable to parse new:\n" + newSQL);
         }
         assertEquals("Expected equality:\n" + sql + "\n" + newSQL, stmt, newStmt);
+        return type != null ? type.cast(stmt) : null;
+    }
+
+    private <T extends BindableStatement> T parseQuery(String sql) throws IOException, SQLException {
+        return parseQuery(sql, null);
     }
 
     private void parseQueryThatShouldFail(String sql) throws Exception {
@@ -63,6 +72,15 @@ public class QueryParserTest {
             fail("Query should throw a PhoenixParserException \n " + sql);
         }
         catch (PhoenixParserException e){
+        }
+    }
+
+    private void parseQueryThatShouldFailWithSQLException(String sql) throws Exception {
+        try {
+            parseQuery(sql);
+            fail("Query should throw a PhoenixParserException \n " + sql);
+        }
+        catch (SQLException e){
         }
     }
 
@@ -479,6 +497,70 @@ public class QueryParserTest {
         }
     }
 
+    private CreateCDCStatement parseCreateCDCSimple(String sql, boolean ifNotExists)
+            throws Exception {
+        CreateCDCStatement stmt = parseQuery(sql, CreateCDCStatement.class);
+        assertEquals("FOO", stmt.getCdcObjName().getName());
+        assertEquals("BAR", stmt.getDataTable().getTableName());
+        assertEquals(ifNotExists, stmt.isIfNotExists());
+        return stmt;
+    }
+
+    @Test
+    public void testCreateCDCSimple() throws Exception {
+        parseCreateCDCSimple("create cdc foo on bar", false);
+        parseCreateCDCSimple("create cdc foo on s.bar", false);
+        parseCreateCDCSimple("create cdc if not exists foo on bar", true);
+        parseCreateCDCSimple("create cdc foo on bar", false);
+        CreateCDCStatement stmt = null;
+        stmt = parseCreateCDCSimple("create cdc foo on bar TTL=100", false);
+        assertEquals(Arrays.asList(new Pair("TTL", 100)),
+                stmt.getProps().get(""));
+        stmt = parseCreateCDCSimple("create cdc foo on bar include (pre)", false);
+        assertEquals(new HashSet<>(Arrays.asList(PTable.CDCChangeScope.PRE)),
+                stmt.getIncludeScopes());
+        stmt = parseCreateCDCSimple("create cdc foo on bar include (pre, post, change)", false);
+        assertEquals(new HashSet<>(Arrays.asList(PTable.CDCChangeScope.PRE,
+                        PTable.CDCChangeScope.POST, PTable.CDCChangeScope.CHANGE)),
+                stmt.getIncludeScopes());
+        stmt = parseCreateCDCSimple("create cdc foo on bar include (pre, pre, post)",
+                false);
+        assertEquals(new HashSet<>(Arrays.asList(PTable.CDCChangeScope.PRE,
+                PTable.CDCChangeScope.POST)), stmt.getIncludeScopes());
+        stmt = parseCreateCDCSimple("create cdc if not exists foo on bar abc=def",
+                true);
+        assertEquals(Arrays.asList(new Pair("ABC", "def")), stmt.getProps().get(""));
+        stmt = parseCreateCDCSimple("create cdc if not exists foo on bar abc=def, prop=val",
+                true);
+        assertEquals(Arrays.asList(new Pair("ABC", "def"), new Pair("PROP", "val")),
+                stmt.getProps().get(""));
+    }
+
+    @Test
+    public void testCreateCDCWithErrors() throws Exception {
+        parseQueryThatShouldFail("create cdc foo");
+        parseQueryThatShouldFail("create cdc foo on bar include (abc)");
+    }
+
+    private void parseInvalidCreateCDC(String sql, int expRrrorCode) throws IOException {
+        try {
+            parseQuery(sql);
+            fail();
+        }
+        catch (SQLException e) {
+            assertEquals(expRrrorCode, e.getErrorCode());
+        }
+    }
+
+    @Test
+    public void testInvalidCreateCDC() throws Exception {
+        parseInvalidCreateCDC("create cdc foo bar", SQLExceptionCode.MISSING_TOKEN.getErrorCode());
+        parseInvalidCreateCDC("create cdc foo bar ts", SQLExceptionCode.MISSING_TOKEN.getErrorCode());
+        parseInvalidCreateCDC("create cdc foo bar(ts)", SQLExceptionCode.MISSING_TOKEN.getErrorCode());
+        parseInvalidCreateCDC("create cdc s.foo on bar(ts)", SQLExceptionCode.MISMATCHED_TOKEN.getErrorCode());
+        parseInvalidCreateCDC("create cdc foo bar(ts1, ts2)", SQLExceptionCode.MISSING_TOKEN.getErrorCode());
+    }
+
     @Test
     public void testInvalidTrailingCommaOnCreateTable() throws Exception {
         String sql = (
@@ -500,7 +582,49 @@ public class QueryParserTest {
                         "increment by 1\n"));
         parseQuery(sql);
     }
-    
+
+    private DropCDCStatement parseDropCDCSimple(String sql, boolean ifNotExists) throws Exception {
+        DropCDCStatement stmt = parseQuery(sql, DropCDCStatement.class);
+        assertEquals("FOO", stmt.getCdcObjName().getName());
+        assertEquals("BAR", stmt.getTableName().getTableName());
+        assertEquals(ifNotExists, stmt.ifExists());
+        return stmt;
+    }
+    @Test
+    public void testDropCDCSimple() throws Exception {
+        DropCDCStatement stmt = null;
+        parseDropCDCSimple("drop cdc foo on bar", false);
+        parseDropCDCSimple("drop cdc if exists foo on bar", true);
+        parseDropCDCSimple("drop cdc if exists foo on s.bar", true);
+    }
+
+    private void parseInvalidDropCDC(String sql, int expRrrorCode) throws IOException {
+        try {
+            parseQuery(sql);
+            fail();
+        }
+        catch (SQLException e) {
+            assertEquals(expRrrorCode, e.getErrorCode());
+        }
+    }
+
+    @Test
+    public void testInvalidDropCDC() throws Exception {
+        parseInvalidDropCDC("drop cdc foo bar", SQLExceptionCode.MISSING_TOKEN.getErrorCode());
+        parseInvalidDropCDC("drop cdc s.foo on bar", SQLExceptionCode.MISMATCHED_TOKEN.getErrorCode());
+        parseInvalidDropCDC("drop cdc foo on bar(ts)", SQLExceptionCode.MISSING_TOKEN.getErrorCode());
+    }
+
+    private void parseInvalidAlterCDC(String sql, int expRrrorCode) throws IOException {
+        try {
+            parseQuery(sql);
+            fail();
+        }
+        catch (SQLException e) {
+            assertEquals(expRrrorCode, e.getErrorCode());
+        }
+    }
+
     @Test
     public void testNextValueForSelect() throws Exception {
         String sql = ((
@@ -925,6 +1049,50 @@ public class QueryParserTest {
         // Expected failures.
         parseQueryThatShouldFail("SHOW CREATE VIEW foo");
         parseQueryThatShouldFail("SHOW CREATE TABLE 'foo'");
+    }
 
+    @Test
+    public void testBinaryLiteral() throws Exception {
+        // As per ISO/IEC 9075-2:2011(E) 5.3 <literal> page 163
+        // The literal syntax is:
+        //
+        // <binary string literal> ::=
+        // X <quote> [ <space>... ] [ { <hexit> [ <space>... ] <hexit> [ <space>... ] }... ] <quote>
+        // [ { <separator> <quote> [ <space>... ] [ { <hexit> [ <space>... ]
+        // <hexit> [ <space>... ] }... ] <quote> }... ]
+        //
+        // With the current grammar we only approximate the multi-line syntax, but
+        // we're close enough for most practical purposes
+        // (We do not enforce a new line before continuation lines)
+
+        // Happy paths
+        parseQuery("SELECT b, x from x WHERE x = x'00'");
+        parseQuery("SELECT b, x from x WHERE x = "
+                + "x'0 12 ' --comment \n /* comment */ '34 567' \n \n 'aA'");
+        parseQuery("SELECT b, x from x WHERE x = "
+                + "b'0 10 ' --comment \n /* comment */ '10 101' \n \n '00000000'");
+
+        // Expected failures.
+        // Space after 'x'
+        parseQueryThatShouldFailWithSQLException("SELECT b, x from x WHERE x = x '00'");
+        parseQueryThatShouldFailWithSQLException("SELECT b, x from x WHERE b = b '00'");
+
+        // Illegal digit character in first line
+        parseQueryThatShouldFail("SELECT b, x from x WHERE x = "
+                + "x'X0 12 ' --comment \n /* comment */ '34 5670' \n \n 'aA'");
+        parseQueryThatShouldFail("SELECT b, x from b WHERE b = "
+                + "b'B0 10 ' --comment \n /* comment */ '10 101' \n \n '000000000'");
+
+        // Illegal digit character in continuation line
+        parseQueryThatShouldFail("SELECT b, x from x WHERE x = "
+                + "x'0 12 ' --comment \n /* comment */ '34 5670' \n \n 'aA_'");
+        parseQueryThatShouldFail("SELECT b, x from x WHERE x = "
+                + "b'0 10 ' --comment \n /* comment */ '00 0000' \n \n '00_'");
+
+        // No digit between quotes in continuation line
+        parseQueryThatShouldFail("SELECT b, x from x WHERE x = "
+                + "x'0 12 ' --comment \n /* comment */ '34 5670' \n \n ''");
+        parseQueryThatShouldFail("SELECT b, x from x WHERE x = "
+                + "b'0 10 ' --comment \n /* comment */ '00 000' \n \n ''");
     }
 }

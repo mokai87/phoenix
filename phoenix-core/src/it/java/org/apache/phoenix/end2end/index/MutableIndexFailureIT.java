@@ -17,6 +17,7 @@
  */
 package org.apache.phoenix.end2end.index;
 
+import static org.apache.hadoop.hbase.coprocessor.CoprocessorHost.REGIONSERVER_COPROCESSOR_CONF_KEY;
 import static org.apache.phoenix.util.TestUtil.TEST_PROPERTIES;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -54,6 +55,7 @@ import org.apache.phoenix.compile.ExplainPlanAttributes;
 import org.apache.phoenix.coprocessor.MetaDataRegionObserver;
 import org.apache.phoenix.coprocessor.MetaDataRegionObserver.BuildIndexScheduleTask;
 import org.apache.phoenix.end2end.NeedsOwnMiniClusterTest;
+import org.apache.phoenix.end2end.PhoenixRegionServerEndpointTestImpl;
 import org.apache.phoenix.execute.CommitException;
 import org.apache.phoenix.hbase.index.write.IndexWriterUtils;
 import org.apache.phoenix.index.PhoenixIndexFailurePolicy;
@@ -86,7 +88,8 @@ import org.junit.experimental.categories.Category;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
 import org.junit.runners.Parameterized.Parameters;
-
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.apache.phoenix.thirdparty.com.google.common.collect.Lists;
 import org.apache.phoenix.thirdparty.com.google.common.collect.Maps;
 /**
@@ -100,6 +103,9 @@ import org.apache.phoenix.thirdparty.com.google.common.collect.Maps;
 @Category(NeedsOwnMiniClusterTest.class)
 @RunWith(Parameterized.class)
 public class MutableIndexFailureIT extends BaseTest {
+
+    private static final Logger LOGGER = LoggerFactory.getLogger(MutableIndexFailureIT.class);
+
     public static volatile boolean FAIL_WRITE = false;
     public static volatile String fullTableName;
     
@@ -172,6 +178,7 @@ public class MutableIndexFailureIT extends BaseTest {
          * because we want to control it's execution ourselves
          */
         serverProps.put(QueryServices.INDEX_REBUILD_TASK_INITIAL_DELAY, Long.toString(Long.MAX_VALUE));
+        serverProps.put(REGIONSERVER_COPROCESSOR_CONF_KEY, PhoenixRegionServerEndpointTestImpl.class.getName());
         return serverProps;
     }
 
@@ -225,7 +232,7 @@ public class MutableIndexFailureIT extends BaseTest {
                         + " Disable timestamp: " + idx.getIndexDisableTimestamp());
         }
         System.out.println("************Index state from server  " + s + "******************");
-        table = PhoenixRuntime.getTableNoCache(phxConn, fullTableName);
+        table = phxConn.getTableNoCache(fullTableName);
         for (PTable idx : table.getIndexes()) {
             System.out.println(
                 "Index Name: " + idx.getName().getString() + " State: " + idx.getIndexState()
@@ -473,6 +480,7 @@ public class MutableIndexFailureIT extends BaseTest {
                         }
                         conn.commit();
                     } catch (SQLException e) {
+                        LOGGER.warn("Error while adding row", e);
                         return false;
                     }
                     return true;
@@ -502,8 +510,9 @@ public class MutableIndexFailureIT extends BaseTest {
         ResultSet rs = conn.createStatement().executeQuery(query);
         String expectedPlan = " OVER "
                 + (localIndex
-                        ? Bytes.toString(
-                                SchemaUtil.getPhysicalTableName(fullTableName.getBytes(), isNamespaceMapped).getName())
+                        ? fullIndexName + "(" + Bytes.toString(
+                                SchemaUtil.getPhysicalTableName(fullTableName.getBytes(),
+                                        isNamespaceMapped).getName()) + ")"
                         : SchemaUtil.getPhysicalTableName(fullIndexName.getBytes(), isNamespaceMapped).getNameAsString());
         String explainPlan = QueryUtil.getExplainPlan(conn.createStatement().executeQuery("EXPLAIN " + query));
         assertTrue(explainPlan, explainPlan.contains(expectedPlan));

@@ -39,13 +39,16 @@ import java.sql.Driver;
 import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.Statement;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Properties;
 import java.util.Set;
+import java.util.regex.Pattern;
 
+import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.client.Admin;
 import org.apache.phoenix.coprocessor.TaskRegionObserver;
 import org.apache.phoenix.exception.SQLExceptionCode;
@@ -57,10 +60,13 @@ import org.apache.phoenix.schema.ColumnNotFoundException;
 import org.apache.phoenix.schema.PTableType;
 import org.apache.phoenix.schema.TableAlreadyExistsException;
 import org.apache.phoenix.schema.TableNotFoundException;
+import org.apache.phoenix.util.MetaDataUtil;
 import org.apache.phoenix.util.PhoenixRuntime;
 import org.apache.phoenix.util.PropertiesUtil;
+import org.apache.phoenix.util.QueryUtil;
 import org.apache.phoenix.util.SchemaUtil;
 import org.apache.phoenix.util.StringUtil;
+import org.apache.phoenix.util.TestUtil;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
 
@@ -73,7 +79,7 @@ public class TenantSpecificTablesDDLIT extends BaseTenantSpecificTablesIT {
         // ensure we didn't create a physical HBase table for the tenant-specific table
         Connection conn = DriverManager.getConnection(getUrl(), PropertiesUtil.deepCopy(TEST_PROPERTIES));
         Admin admin = conn.unwrap(PhoenixConnection.class).getQueryServices().getAdmin();
-        assertEquals(0, admin.listTables(TENANT_TABLE_NAME).length);
+        assertEquals(0, admin.listTableDescriptors(Pattern.compile(TENANT_TABLE_NAME)).size());
     }
     
     @Test
@@ -418,7 +424,7 @@ public class TenantSpecificTablesDDLIT extends BaseTenantSpecificTablesIT {
 
 	private void validateTenantViewIsDropped(Connection connTenant)	throws SQLException {
         try {
-            PhoenixRuntime.getTableNoCache(connTenant, TENANT_TABLE_NAME);
+            connTenant.unwrap(PhoenixConnection.class).getTableNoCache(TENANT_TABLE_NAME);
             fail("Tenant specific view " + TENANT_TABLE_NAME
                     + " should have been dropped when parent was dropped");
         } catch (TableNotFoundException e) {
@@ -547,6 +553,10 @@ public class TenantSpecificTablesDDLIT extends BaseTenantSpecificTablesIT {
             assertTrue(rs.next());
             assertTableMetaData(rs, PhoenixDatabaseMetaData.SYSTEM_CATALOG_SCHEMA, PhoenixDatabaseMetaData.SYSTEM_CATALOG_TABLE, PTableType.SYSTEM);
             assertTrue(rs.next());
+            assertTableMetaData(rs, SYSTEM_CATALOG_SCHEMA, PhoenixDatabaseMetaData.SYSTEM_CDC_STREAM_TABLE, PTableType.SYSTEM);
+            assertTrue(rs.next());
+            assertTableMetaData(rs, SYSTEM_CATALOG_SCHEMA, PhoenixDatabaseMetaData.SYSTEM_CDC_STREAM_STATUS_TABLE, PTableType.SYSTEM);
+            assertTrue(rs.next());
             assertTableMetaData(rs, PhoenixDatabaseMetaData.SYSTEM_CATALOG_SCHEMA, PhoenixDatabaseMetaData.SYSTEM_CHILD_LINK_TABLE, PTableType.SYSTEM);
             assertTrue(rs.next());
             assertTableMetaData(rs, SYSTEM_CATALOG_SCHEMA, SYSTEM_FUNCTION_TABLE, SYSTEM);
@@ -613,6 +623,58 @@ public class TenantSpecificTablesDDLIT extends BaseTenantSpecificTablesIT {
         }
         finally {
             conn.close();
+        }
+    }
+
+    @Test
+    public void testIndexHintWithTenantView() throws Exception {
+        String schemaName = generateUniqueName();
+        String dataTableName = generateUniqueName();
+        String fullDataTableName = SchemaUtil.getTableName(schemaName, dataTableName);
+        String viewName = generateUniqueName();
+        String fullViewName = SchemaUtil.getTableName(schemaName, viewName);
+        String viewIndexName = generateUniqueName();
+        try(Connection conn = DriverManager.getConnection(getUrl());
+            Statement stmt = conn.createStatement()) {
+            String createDataTable = "create table " + fullDataTableName + " (orgid varchar(10) not null, "
+                    + "id1 varchar(10) not null, id2 varchar(10) not null, id3 integer not null, "
+                    + "val1 varchar(10), val2 varchar(10) " +
+                    "CONSTRAINT PK PRIMARY KEY (orgid, id1, id2, id3)) MULTI_TENANT=true";
+            stmt.execute(createDataTable);
+            stmt.execute("create view " + fullViewName + " as select * from " + fullDataTableName);
+            stmt.execute("create index " + viewIndexName + " on " + fullViewName + "(id3, id2, id1) include (val1, val2)");
+        }
+        try(Connection conn = DriverManager.getConnection(PHOENIX_JDBC_TENANT_SPECIFIC_URL);
+            Statement stmt = conn.createStatement()) {
+            String grandChildViewName = generateUniqueName();
+            String fullGrandChildViewName = SchemaUtil.getTableName(schemaName, grandChildViewName);
+            stmt.execute("create view " + fullGrandChildViewName + " as select * from " + fullViewName);
+            PhoenixConnection pconn = conn.unwrap(PhoenixConnection.class);
+            pconn.getTableNoCache(pconn.getTenantId(), fullGrandChildViewName);
+            stmt.execute("upsert into " + fullGrandChildViewName + " values ('a1', 'a2', 3, 'a4', 'a5')");
+            conn.commit();
+            stmt.execute("upsert into " + fullGrandChildViewName + " values ('b1', 'b2', 3, 'b4', 'b5')");
+            conn.commit();
+            String physicalViewIndexTableName = MetaDataUtil.getViewIndexPhysicalName(fullDataTableName);
+            TableName viewIndexHBaseTable = TableName.valueOf(physicalViewIndexTableName);
+            TestUtil.assertRawRowCount(conn, viewIndexHBaseTable, 2);
+            String sql = "SELECT /*+ INDEX(" + fullGrandChildViewName + " " + viewIndexName + ")*/ "
+                    + "val2, id2, val1, id3, id1 FROM " + fullGrandChildViewName
+                    + " WHERE id2 = 'a2' AND (id1 = 'a1' OR id1 = 'b1') AND id3 = 3";
+            ResultSet rs = stmt.executeQuery("EXPLAIN " + sql);
+            String actualQueryPlan = QueryUtil.getExplainPlan(rs);
+            assertTrue(actualQueryPlan.contains("1-WAY POINT LOOKUP ON 2 KEYS OVER " + physicalViewIndexTableName));
+            rs = stmt.executeQuery(sql);
+            assertTrue(rs.next());
+            assertFalse(rs.next());
+            sql = "SELECT val2, id2, val1, id3, id1 FROM " + fullGrandChildViewName
+                    + " WHERE id2 = 'a2' AND (id1 = 'a1' OR id1 = 'b1') AND id3 = 3";
+            rs = stmt.executeQuery("EXPLAIN " + sql);
+            actualQueryPlan = QueryUtil.getExplainPlan(rs);
+            assertTrue(actualQueryPlan.contains("1-WAY POINT LOOKUP ON 2 KEYS OVER " + fullDataTableName));
+            rs = stmt.executeQuery(sql);
+            assertTrue(rs.next());
+            assertFalse(rs.next());
         }
     }
     

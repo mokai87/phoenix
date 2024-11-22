@@ -18,6 +18,10 @@
 package org.apache.phoenix.jdbc;
 
 import org.apache.hadoop.hbase.StartMiniClusterOption;
+import org.apache.phoenix.end2end.PhoenixRegionServerEndpointTestImpl;
+import org.apache.phoenix.end2end.ServerMetadataCacheTestImpl;
+import org.apache.phoenix.query.QueryServicesOptions;
+import org.apache.phoenix.thirdparty.com.google.common.annotations.VisibleForTesting;
 import org.apache.phoenix.thirdparty.com.google.common.collect.ImmutableList;
 import org.apache.commons.lang3.RandomUtils;
 import org.apache.curator.framework.CuratorFramework;
@@ -51,6 +55,7 @@ import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.apache.hadoop.hbase.HConstants.*;
+import static org.apache.hadoop.hbase.coprocessor.CoprocessorHost.REGIONSERVER_COPROCESSOR_CONF_KEY;
 import static org.apache.hadoop.hbase.ipc.RpcClient.*;
 import static org.apache.hadoop.hdfs.DFSConfigKeys.DFS_REPLICATION_KEY;
 import static org.apache.hadoop.test.GenericTestUtils.waitFor;
@@ -77,14 +82,16 @@ public class HighAvailabilityTestingUtility {
     public static class HBaseTestingUtilityPair implements Closeable {
         private final HBaseTestingUtility hbaseCluster1 = new HBaseTestingUtility();
         private final HBaseTestingUtility hbaseCluster2 = new HBaseTestingUtility();
-        /** The host:port:/hbase format of the JDBC string for HBase cluster 1. */
+        /** The host\:port::/hbase format of the JDBC string for HBase cluster 1. */
         private String url1;
-        /** The host:port:/hbase format of the JDBC string for HBase cluster 2. */
+        /** The host\:port::/hbase format of the JDBC string for HBase cluster 2. */
         private String url2;
         private PhoenixHAAdminHelper haAdmin1;
         private PhoenixHAAdminHelper haAdmin2;
         private Admin admin1;
         private Admin admin2;
+        @VisibleForTesting
+        static final String PRINCIPAL = "USER_FOO";
 
         public HBaseTestingUtilityPair() {
             Configuration conf1 = hbaseCluster1.getConfiguration();
@@ -111,8 +118,8 @@ public class HighAvailabilityTestingUtility {
             String confAddress1 = hbaseCluster1.getConfiguration().get(HConstants.ZOOKEEPER_QUORUM);
             String confAddress2 = hbaseCluster2.getConfiguration().get(HConstants.ZOOKEEPER_QUORUM);
 
-            url1 = String.format("%s:%d:/hbase", confAddress1, hbaseCluster1.getZkCluster().getClientPort());
-            url2 = String.format("%s:%d:/hbase", confAddress2, hbaseCluster2.getZkCluster().getClientPort());
+            url1 = String.format("%s\\:%d::/hbase", confAddress1, hbaseCluster1.getZkCluster().getClientPort());
+            url2 = String.format("%s\\:%d::/hbase", confAddress2, hbaseCluster2.getZkCluster().getClientPort());
 
             haAdmin1 = new PhoenixHAAdminHelper(getUrl1(), hbaseCluster1.getConfiguration(), PhoenixHAAdminTool.HighAvailibilityCuratorProvider.INSTANCE);
             haAdmin2 = new PhoenixHAAdminHelper(getUrl2(), hbaseCluster2.getConfiguration(), PhoenixHAAdminTool.HighAvailibilityCuratorProvider.INSTANCE);
@@ -243,7 +250,7 @@ public class HighAvailabilityTestingUtility {
         public Connection getClusterConnection(int clusterIndex) throws SQLException {
             String clusterUrl = clusterIndex == 1 ? getUrl1() : getUrl2();
             Properties props = new Properties();
-            String url = String.format("jdbc:phoenix:%s", clusterUrl);
+            String url = getJdbcUrl(clusterUrl);
             return DriverManager.getConnection(url, props);
         }
 
@@ -339,8 +346,19 @@ public class HighAvailabilityTestingUtility {
         /**
          * @return the JDBC connection URL for this pair of HBase cluster in the HA format
          */
-        public String getJdbcUrl() {
-            return String.format("jdbc:phoenix:[%s|%s]", url1, url2);
+        public String getJdbcHAUrl() {
+            return getJdbcUrl(String.format("[%s|%s]", url1, url2));
+        }
+
+        public String getJdbcUrl1() {
+            return getJdbcUrl(url1);
+        }
+        public String getJdbcUrl2() {
+            return getJdbcUrl(url2);
+        }
+
+        public String getJdbcUrl(String zkUrl) {
+            return String.format("jdbc:phoenix+zk:%s:%s", zkUrl, PRINCIPAL);
         }
 
         public String getUrl1() {
@@ -395,7 +413,7 @@ public class HighAvailabilityTestingUtility {
         public void createTableOnClusterPair(String tableName, boolean replicationScope)
                 throws SQLException {
             for (String url : Arrays.asList(getUrl1(), getUrl2())) {
-                String jdbcUrl = String.format("jdbc:phoenix:%s", url);
+                String jdbcUrl = getJdbcUrl(url);
                 try (Connection conn = DriverManager.getConnection(jdbcUrl, new Properties())) {
                     conn.createStatement().execute(String.format(
                             "CREATE TABLE IF NOT EXISTS %s (\n"
@@ -426,7 +444,7 @@ public class HighAvailabilityTestingUtility {
          */
         public void createTenantSpecificTable(String tableName) throws SQLException {
             for (String url : Arrays.asList(getUrl1(), getUrl2())) {
-                String jdbcUrl = String.format("jdbc:phoenix:%s", url);
+                String jdbcUrl = getJdbcUrl(url);
                 try (Connection conn = DriverManager.getConnection(jdbcUrl, new Properties())) {
                     conn.createStatement().execute(String.format(
                             "CREATE TABLE IF NOT EXISTS %s (\n"
@@ -458,6 +476,7 @@ public class HighAvailabilityTestingUtility {
             admin1.close();
             admin2.close();
             try {
+                ServerMetadataCacheTestImpl.resetCache();
                 hbaseCluster1.shutdownMiniCluster();
                 hbaseCluster2.shutdownMiniCluster();
             } catch (Exception e) {
@@ -520,6 +539,10 @@ public class HighAvailabilityTestingUtility {
 
             // Hadoop cluster settings to avoid failing tests
             conf.setInt(DFS_REPLICATION_KEY, 1); // we only need one replica for testing
+
+            // Phoenix Region Server Endpoint needed for metadata caching
+            conf.set(REGIONSERVER_COPROCESSOR_CONF_KEY,
+                        PhoenixRegionServerEndpointTestImpl.class.getName());
         }
     }
 

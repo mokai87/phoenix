@@ -22,6 +22,7 @@
 from __future__ import print_function
 import os
 import fnmatch
+import re
 import subprocess
 
 def find(pattern, classPaths):
@@ -78,6 +79,7 @@ def findClasspath(command_name):
 
 def setPath():
     PHOENIX_CLIENT_EMBEDDED_JAR_PATTERN = "phoenix-client-embedded-hbase-*[!s].jar"
+    PHOENIX_CLIENT_LITE_JAR_PATTERN = "phoenix-client-lite-hbase-*[!s].jar"
     PHOENIX_TRACESERVER_JAR_PATTERN = "phoenix-tracing-webapp-*-runnable.jar"
     PHOENIX_TESTS_JAR_PATTERN = "phoenix-core-*-tests*.jar"
     PHOENIX_PHERF_JAR_PATTERN = "phoenix-pherf-*[!s].jar"
@@ -130,6 +132,16 @@ def setPath():
         phoenix_client_embedded_jar = findFileInPathWithoutRecursion(PHOENIX_CLIENT_EMBEDDED_JAR_PATTERN, os.path.join(current_dir, ".."))
     if phoenix_client_embedded_jar == "":
         phoenix_client_embedded_jar = find(PHOENIX_CLIENT_EMBEDDED_JAR_PATTERN, phoenix_class_path)
+
+    global phoenix_lite_jar_path
+    phoenix_lite_jar_path = os.path.join(current_dir, "..", "phoenix-client-parent" , "phoenix-client-lite", "target","*")
+
+    global phoenix_client_lite_jar
+    phoenix_client_lite_jar = find(PHOENIX_CLIENT_LITE_JAR_PATTERN, phoenix_lite_jar_path)
+    if phoenix_client_lite_jar == "":
+        phoenix_client_lite_jar = findFileInPathWithoutRecursion(PHOENIX_CLIENT_LITE_JAR_PATTERN, os.path.join(current_dir, ".."))
+    if phoenix_client_lite_jar == "":
+        phoenix_client_lite_jar = find(PHOENIX_CLIENT_LITE_JAR_PATTERN, phoenix_class_path)
 
     global phoenix_test_jar_path
     phoenix_test_jar_path = os.path.join(current_dir, "..", "phoenix-core", "target","*")
@@ -189,6 +201,8 @@ def setPath():
         logging_jar += ":"+findFileInPathWithoutRecursion(LOGGING_JAR_PATTERN2, os.path.join(current_dir, "..","lib"))
         logging_jar += ":"+findFileInPathWithoutRecursion(LOGGING_JAR_PATTERN3, os.path.join(current_dir, "..","lib"))
 
+    __set_java_home()
+    __set_jvm_flags()
     return ""
 
 def shell_quote(args):
@@ -206,10 +220,84 @@ def shell_quote(args):
         import pipes
         return " ".join([pipes.quote(tryDecode(v)) for v in args])
 
+
+def __set_java_home():
+    global java_home
+    global java
+    java_home = os.getenv('JAVA_HOME')
+    java = 'java'
+
+    # HBase configuration folder path (where hbase-site.xml reside) for
+    # HBase/Phoenix client side property override
+    hbase_config_path = hbase_conf_dir
+
+    # load hbase-env.??? to extract JAVA_HOME, HBASE_PID_DIR, HBASE_LOG_DIR
+    hbase_env_path = None
+    hbase_env_cmd  = None
+    if os.name == 'posix':
+        hbase_env_path = os.path.join(hbase_config_path, 'hbase-env.sh')
+        hbase_env_cmd = ['bash', '-c', 'source %s && env' % hbase_env_path]
+    elif os.name == 'nt':
+        hbase_env_path = os.path.join(hbase_config_path, 'hbase-env.cmd')
+        hbase_env_cmd = ['cmd.exe', '/c', 'call %s & set' % hbase_env_path]
+    if not hbase_env_path or not hbase_env_cmd:
+        sys.stderr.write("hbase-env file unknown on platform {}{}".format(os.name, os.linesep))
+        sys.exit(-1)
+
+    hbase_env = {}
+    if os.path.isfile(hbase_env_path):
+        p = subprocess.Popen(hbase_env_cmd, stdout = subprocess.PIPE)
+        for x in p.stdout:
+            (k, _, v) = tryDecode(x).partition('=')
+            hbase_env[k.strip()] = v.strip()
+
+    if 'JAVA_HOME' in hbase_env:
+        java_home = hbase_env['JAVA_HOME']
+
+    if java_home:
+        java = os.path.join(java_home, 'bin', 'java')
+
+    return ""
+
+
+def __set_jvm_flags():
+    global jvm_module_flags
+    jvm_module_flags = ""
+    # This should be ASCII
+    version_output = subprocess.check_output([java, "-version"], stderr=subprocess.STDOUT).decode()
+    version_output = tryDecode(version_output)
+    m = re.search(r'version\s"(\d+)\.(\d+)', version_output)
+    if (m is None):
+        # Could not find version
+        return ""
+    major = m.group(1)
+    minor = m.group(2)
+    if (major is None or minor is None):
+        #Could not identify version
+        return ""
+    if (minor == "1"):
+        major = minor
+    if (int(major) >= 11):
+        # Copied from hbase startup script
+        jvm_module_flags = "-Dorg.apache.hbase.thirdparty.io.netty.tryReflectionSetAccessible=true \
+--add-modules jdk.unsupported \
+--add-opens java.base/java.nio=ALL-UNNAMED \
+--add-opens java.base/sun.nio.ch=ALL-UNNAMED \
+--add-opens java.base/java.lang=ALL-UNNAMED \
+--add-opens java.base/jdk.internal.ref=ALL-UNNAMED \
+--add-opens java.base/java.lang.reflect=ALL-UNNAMED \
+--add-exports java.base/jdk.internal.misc=ALL-UNNAMED \
+--add-exports java.security.jgss/sun.security.krb5=ALL-UNNAMED \
+--add-exports java.base/sun.net.dns=ALL-UNNAMED \
+--add-exports java.base/sun.net.util=ALL-UNNAMED"
+    return ""
+
 def common_sqlline_args(parser):
-    parser.add_argument('-v', '--verbose', help='Verbosity on sqlline.', default='true')
-    parser.add_argument('-c', '--color', help='Color setting for sqlline.', default='true')
-    parser.add_argument('-fc', '--fastconnect', help='Fetch all schemas on initial connection', default='false')
+    parser.add_argument('-v', '--verbose', help='Verbosity on sqlline.', action="store_true")
+    parser.add_argument('-c', '--color', help='Color setting for sqlline.', action="store_true")
+    parser.add_argument('-fc', '--fastconnect',
+                        help='Fetch all schemas on initial connection',
+                        action="store_true")
 
 if __name__ == "__main__":
     setPath()
@@ -224,3 +312,6 @@ if __name__ == "__main__":
     print("sqlline_with_deps_jar:", sqlline_with_deps_jar)
     print("slf4j_backend_jar:", slf4j_backend_jar)
     print("logging_jar:", logging_jar)
+    print("java_home:", java_home)
+    print("java:", java)
+    print("jvm_module_flags:", jvm_module_flags)

@@ -25,8 +25,8 @@ import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.client.Admin;
 import org.apache.hadoop.hbase.client.ConnectionFactory;
 import org.apache.hadoop.hbase.util.VersionInfo;
-import org.apache.phoenix.coprocessor.BaseScannerRegionObserver;
-import org.apache.phoenix.coprocessor.MetaDataProtocol;
+import org.apache.phoenix.coprocessorclient.BaseScannerRegionObserverConstants;
+import org.apache.phoenix.coprocessorclient.MetaDataProtocol;
 import org.apache.phoenix.jdbc.PhoenixDatabaseMetaData;
 import org.apache.phoenix.query.QueryConstants;
 import org.apache.phoenix.util.PropertiesUtil;
@@ -41,6 +41,8 @@ import java.io.FileWriter;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.net.URL;
+import java.nio.file.Files;
+import java.nio.file.Paths;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.PreparedStatement;
@@ -73,6 +75,14 @@ public final class BackwardCompatibilityTestUtil {
     public static final String CREATE_ADD = "create_add";
     public static final String CREATE_TMP_TABLE = "create_tmp_table";
     public static final String CREATE_DIVERGED_VIEW = "create_diverged_view";
+    public static final String UNORDERED_GROUP_BY = "unorder_groupby";
+    public static final String ORDERED_GROUP_BY = "ordered_groupby";
+    public static final String ORDER_BY_NON_PK = "orderby_nonpk";
+    public static final String OFFSET = "offset";
+    public static final String CREATE_UNORDERED_GROUP_BY = "create_" + UNORDERED_GROUP_BY;
+    public static final String CREATE_ORDERED_GROUP_BY = "create_" + ORDERED_GROUP_BY;
+    public static final String CREATE_ORDER_BY_NON_PK = "create_" + ORDER_BY_NON_PK;
+    public static final String CREATE_OFFSET = "create_" + OFFSET;
     public static final String ADD_DATA = "add_data";
     public static final String ADD_DELETE = "add_delete";
     public static final String ADD_VIEW_INDEX = "add_view_index";
@@ -80,6 +90,10 @@ public final class BackwardCompatibilityTestUtil {
     public static final String DELETE_FOR_SPLITABLE_SYSCAT = "delete_for_splitable_syscat";
     public static final String VIEW_INDEX = "view_index";
     public static final String SELECT_AND_DROP_TABLE = "select_and_drop_table";
+    public static final String QUERY_UNORDERED_GROUP_BY = QUERY_PREFIX + UNORDERED_GROUP_BY;
+    public static final String QUERY_ORDERED_GROUP_BY = QUERY_PREFIX + ORDERED_GROUP_BY;
+    public static final String QUERY_OFFSET = QUERY_PREFIX + OFFSET;
+    public static final String QUERY_ORDER_BY_NON_PK = QUERY_PREFIX + ORDER_BY_NON_PK;
     public static final String QUERY_CREATE_ADD = QUERY_PREFIX + CREATE_ADD;
     public static final String QUERY_ADD_DATA = QUERY_PREFIX + ADD_DATA;
     public static final String QUERY_ADD_DELETE = QUERY_PREFIX + ADD_DELETE;
@@ -192,8 +206,14 @@ public final class BackwardCompatibilityTestUtil {
         };
         errorStreamThread.start();
         p.waitFor();
-        assertEquals(String.format("Executing the query failed%s. Check the result file: %s",
-                sb.length() > 0 ? sb.append(" with : ").toString() : "", resultFilePath),
+        String resultDump = "PLACEHOLDER. Could not read result file";
+        try {
+            resultDump = new String(Files.readAllBytes(Paths.get(resultFilePath)));
+        } catch (Exception e) {
+            //We return the placeholder
+        }
+        assertEquals(String.format("Executing the query failed%s. Check the result file: %s\nResult file dump follows:\n%s",
+                sb.length() > 0 ? sb.append(" with : ").toString() : "", resultFilePath, resultDump),
                 0, p.exitValue());
     }
 
@@ -283,7 +303,7 @@ public final class BackwardCompatibilityTestUtil {
             // connection is set to be the phoenix version timestamp
             // (31 as of now: MIN_SYSTEM_TABLE_TIMESTAMP_4_16_0 / MIN_SYSTEM_TABLE_TIMESTAMP_5_1_0)
             // Hence, keeping value: 15
-            props.put(BaseScannerRegionObserver.PHOENIX_MAX_LOOKBACK_AGE_CONF_KEY,
+            props.put(BaseScannerRegionObserverConstants.PHOENIX_MAX_LOOKBACK_AGE_CONF_KEY,
                     Integer.toString(15));
         }
 

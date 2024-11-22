@@ -58,9 +58,11 @@ import org.apache.phoenix.jdbc.PhoenixStatement.Operation;
 import org.apache.phoenix.log.LogLevel;
 import org.apache.phoenix.monitoring.GlobalMetric;
 import org.apache.phoenix.monitoring.MetricType;
+import org.apache.phoenix.query.ConnectionQueryServices;
 import org.apache.phoenix.query.QueryServices;
 import org.apache.phoenix.util.PhoenixRuntime;
 import org.junit.AfterClass;
+import org.junit.Assert;
 import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.Rule;
@@ -95,6 +97,7 @@ public class ParallelPhoenixConnectionIT {
     public static void setUpBeforeClass() throws Exception {
         CLUSTERS.start();
         DriverManager.registerDriver(PhoenixDriver.INSTANCE);
+        DriverManager.registerDriver(new PhoenixTestDriver());
         GLOBAL_PROPERTIES.setProperty(AUTO_COMMIT_ATTRIB, "true");
         GLOBAL_PROPERTIES.setProperty(QueryServices.COLLECT_REQUEST_LEVEL_METRICS, String.valueOf(true));
         GLOBAL_PROPERTIES.setProperty(QueryServices.LOG_LEVEL, LogLevel.DEBUG.name()); //Need logging for query metrics
@@ -114,8 +117,8 @@ public class ParallelPhoenixConnectionIT {
         // Make first cluster ACTIVE
         CLUSTERS.initClusterRole(haGroupName, PARALLEL);
 
-        haGroup = HighAvailabilityTestingUtility.getHighAvailibilityGroup(CLUSTERS.getJdbcUrl(), clientProperties);
-        LOG.info("Initialized haGroup {} with URL {}", haGroup, CLUSTERS.getJdbcUrl());
+        haGroup = HighAvailabilityTestingUtility.getHighAvailibilityGroup(CLUSTERS.getJdbcHAUrl(), clientProperties);
+        LOG.info("Initialized haGroup {} with URL {}", haGroup, CLUSTERS.getJdbcHAUrl());
         tableName = testName.getMethodName();
         CLUSTERS.createTableOnClusterPair(tableName);
     }
@@ -127,6 +130,37 @@ public class ParallelPhoenixConnectionIT {
     public void testOperationUsingConnection() throws Exception {
         try (Connection conn = getParallelConnection()) {
             doTestBasicOperationsWithConnection(conn, tableName, haGroupName);
+        }
+    }
+
+    @Test
+    public void testUserPrincipal() throws Exception {
+        try (Connection conn = getParallelConnection()) {
+            ParallelPhoenixConnection pr = conn.unwrap(ParallelPhoenixConnection.class);
+            ParallelPhoenixContext context = pr.getContext();
+            HighAvailabilityGroup.HAGroupInfo group = context.getHaGroup().getGroupInfo();
+            if (CLUSTERS.getUrl1().compareTo(CLUSTERS.getUrl2()) <= 0) {
+                Assert.assertEquals(CLUSTERS.getJdbcUrl1(), group.getJDBCUrl1());
+                Assert.assertEquals(CLUSTERS.getJdbcUrl2(), group.getJDBCUrl2());
+            } else {
+                Assert.assertEquals(CLUSTERS.getJdbcUrl2(), group.getJDBCUrl1());
+                Assert.assertEquals(CLUSTERS.getJdbcUrl1(), group.getJDBCUrl2());
+            }
+            ConnectionQueryServices cqsi;
+            // verify connection#1
+            cqsi = PhoenixDriver.INSTANCE.getConnectionQueryServices(group.getJDBCUrl1(), clientProperties);
+            Assert.assertEquals(HBaseTestingUtilityPair.PRINCIPAL, cqsi.getUserName());
+            PhoenixConnection pConn = pr.getFutureConnection1().get();
+            ConnectionQueryServices cqsiFromConn = pConn.getQueryServices();
+            Assert.assertEquals(HBaseTestingUtilityPair.PRINCIPAL, cqsiFromConn.getUserName());
+            Assert.assertTrue(cqsi == cqsiFromConn);
+            // verify connection#2
+            cqsi = PhoenixDriver.INSTANCE.getConnectionQueryServices(group.getJDBCUrl2(), clientProperties);
+            Assert.assertEquals(HBaseTestingUtilityPair.PRINCIPAL, cqsi.getUserName());
+            pConn = pr.getFutureConnection2().get();
+            cqsiFromConn = pConn.getQueryServices();
+            Assert.assertEquals(HBaseTestingUtilityPair.PRINCIPAL, cqsiFromConn.getUserName());
+            Assert.assertTrue(cqsi == cqsiFromConn);
         }
     }
 
@@ -513,7 +547,7 @@ public class ParallelPhoenixConnectionIT {
      * @throws SQLException
      */
     private Connection getParallelConnection() throws SQLException {
-        return DriverManager.getConnection(CLUSTERS.getJdbcUrl(), clientProperties);
+        return DriverManager.getConnection(CLUSTERS.getJdbcHAUrl(), clientProperties);
     }
 
     void waitForCompletion(Connection conn) throws Exception {

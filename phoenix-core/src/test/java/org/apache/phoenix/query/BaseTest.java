@@ -17,6 +17,7 @@
  */
 package org.apache.phoenix.query;
 
+import static org.apache.hadoop.hbase.coprocessor.CoprocessorHost.REGIONSERVER_COPROCESSOR_CONF_KEY;
 import static org.apache.phoenix.hbase.index.write.ParallelWriterIndexCommitter.NUM_CONCURRENT_INDEX_WRITER_THREADS_CONF_KEY;
 import static org.apache.phoenix.query.QueryConstants.MILLIS_IN_DAY;
 import static org.apache.phoenix.query.QueryServices.DROP_METADATA_ATTRIB;
@@ -119,7 +120,6 @@ import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.HBaseConfiguration;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
 import org.apache.hadoop.hbase.HConstants;
-import org.apache.hadoop.hbase.HRegionInfo;
 import org.apache.hadoop.hbase.IntegrationTestingUtility;
 import org.apache.hadoop.hbase.MiniHBaseCluster;
 import org.apache.hadoop.hbase.RegionMetrics;
@@ -128,6 +128,11 @@ import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.client.Admin;
 import org.apache.hadoop.hbase.client.RegionInfo;
 import org.apache.hadoop.hbase.client.TableDescriptor;
+import org.apache.hadoop.hbase.client.Delete;
+import org.apache.hadoop.hbase.client.Result;
+import org.apache.hadoop.hbase.client.ResultScanner;
+import org.apache.hadoop.hbase.client.Scan;
+import org.apache.hadoop.hbase.client.Table;
 import org.apache.hadoop.hbase.ipc.PhoenixRpcSchedulerFactory;
 import org.apache.hadoop.hbase.master.HMaster;
 import org.apache.hadoop.hbase.master.assignment.AssignmentManager;
@@ -142,15 +147,17 @@ import org.apache.phoenix.end2end.ParallelStatsDisabledIT;
 import org.apache.phoenix.end2end.ParallelStatsDisabledTest;
 import org.apache.phoenix.end2end.ParallelStatsEnabledIT;
 import org.apache.phoenix.end2end.ParallelStatsEnabledTest;
+import org.apache.phoenix.end2end.PhoenixRegionServerEndpointTestImpl;
+import org.apache.phoenix.end2end.ServerMetadataCacheTestImpl;
 import org.apache.phoenix.exception.SQLExceptionCode;
 import org.apache.phoenix.exception.SQLExceptionInfo;
+import org.apache.phoenix.hbase.index.IndexRegionObserver;
 import org.apache.phoenix.jdbc.PhoenixConnection;
 import org.apache.phoenix.jdbc.PhoenixDatabaseMetaData;
 import org.apache.phoenix.jdbc.PhoenixEmbeddedDriver;
 import org.apache.phoenix.jdbc.PhoenixTestDriver;
 import org.apache.phoenix.schema.NewerTableAlreadyExistsException;
 import org.apache.phoenix.schema.PTable;
-import org.apache.phoenix.schema.PTableKey;
 import org.apache.phoenix.schema.PTableType;
 import org.apache.phoenix.schema.TableAlreadyExistsException;
 import org.apache.phoenix.schema.TableNotFoundException;
@@ -158,6 +165,7 @@ import org.apache.phoenix.util.ConfigUtil;
 import org.apache.phoenix.util.DateUtil;
 import org.apache.phoenix.util.PhoenixRuntime;
 import org.apache.phoenix.util.PropertiesUtil;
+import org.apache.phoenix.util.QueryBuilder;
 import org.apache.phoenix.util.QueryUtil;
 import org.apache.phoenix.util.ReadOnlyProps;
 import org.apache.phoenix.util.SchemaUtil;
@@ -490,6 +498,8 @@ public abstract class BaseTest {
             LOGGER.error("Exception caught when shutting down mini map reduce cluster", t);
         } finally {
             try {
+                // Clear ServerMetadataCache.
+                ServerMetadataCacheTestImpl.resetCache();
                 utility.shutdownMiniCluster();
             } catch (Throwable t) {
                 LOGGER.error("Exception caught when shutting down mini cluster", t);
@@ -545,7 +555,8 @@ public abstract class BaseTest {
         utility = new HBaseTestingUtility(conf);
         try {
             long startTime = System.currentTimeMillis();
-            utility.startMiniCluster(NUM_SLAVES_BASE);
+            utility.startMiniCluster(overrideProps.getInt(
+                    QueryServices.TESTS_MINI_CLUSTER_NUM_REGION_SERVERS, NUM_SLAVES_BASE));
             long startupTime = System.currentTimeMillis()-startTime;
             LOGGER.info("HBase minicluster startup complete in {} ms", startupTime);
             return getLocalClusterUrl(utility);
@@ -615,7 +626,6 @@ public abstract class BaseTest {
          */
         conf.setInt(HConstants.REGION_SERVER_HANDLER_COUNT, 5);
         conf.setInt("hbase.regionserver.metahandler.count", 2);
-        conf.setInt(HConstants.MASTER_HANDLER_COUNT, 2);
         conf.setInt("dfs.namenode.handler.count", 2);
         conf.setInt("dfs.namenode.service.handler.count", 2);
         conf.setInt("dfs.datanode.handler.count", 2);
@@ -637,9 +647,25 @@ public abstract class BaseTest {
         if (conf.getLong(QueryServices.PHOENIX_SERVER_PAGE_SIZE_MS, 0) == 0) {
             conf.setLong(QueryServices.PHOENIX_SERVER_PAGE_SIZE_MS, 0);
         }
+        setPhoenixRegionServerEndpoint(conf);
         return conf;
     }
 
+    /*
+        Set property hbase.coprocessor.regionserver.classes to include test implementation of
+        PhoenixRegionServerEndpoint by default, if some other regionserver coprocs
+        are not already present.
+     */
+    protected static void setPhoenixRegionServerEndpoint(Configuration conf) {
+        String value = conf.get(REGIONSERVER_COPROCESSOR_CONF_KEY);
+        if (value == null) {
+            value = PhoenixRegionServerEndpointTestImpl.class.getName();
+        }
+        else {
+            value = value + "," + PhoenixRegionServerEndpointTestImpl.class.getName();
+        }
+        conf.set(REGIONSERVER_COPROCESSOR_CONF_KEY, value);
+    }
     private static PhoenixTestDriver newTestDriver(ReadOnlyProps props) throws Exception {
         PhoenixTestDriver newDriver;
         String driverClassName = props.get(DRIVER_CLASS_NAME_ATTRIB);
@@ -747,6 +773,12 @@ public abstract class BaseTest {
         createTestTable(url, ddl, splits, ts);
     }
 
+    protected ResultSet executeQuery(Connection conn, QueryBuilder queryBuilder) throws SQLException {
+        PreparedStatement statement = conn.prepareStatement(queryBuilder.build());
+        ResultSet rs = statement.executeQuery();
+        return rs;
+    }
+
     private static AtomicInteger NAME_SUFFIX = new AtomicInteger(0);
     private static final int MAX_SUFFIX_VALUE = 1000000;
 
@@ -790,7 +822,7 @@ public abstract class BaseTest {
             expectedColumnEncoding, String tableName)
             throws Exception {
         PhoenixConnection phxConn = conn.unwrap(PhoenixConnection.class);
-        PTable table = PhoenixRuntime.getTableNoCache(phxConn, tableName);
+        PTable table = phxConn.getTableNoCache(tableName);
         assertEquals(expectedStorageScheme, table.getImmutableStorageScheme());
         assertEquals(expectedColumnEncoding, table.getEncodingScheme());
     }
@@ -944,7 +976,7 @@ public abstract class BaseTest {
                             rs.getString(PhoenixDatabaseMetaData.TABLE_SCHEM),
                             rs.getString(PhoenixDatabaseMetaData.TABLE_NAME));
                     try {
-                        PhoenixRuntime.getTable(conn, fullTableName);
+                        conn.unwrap(PhoenixConnection.class).getTable(fullTableName);
                         fail("The following tables are not deleted that should be:" + getTableNames(rs));
                     } catch (TableNotFoundException e) {
                     }
@@ -1576,9 +1608,9 @@ public abstract class BaseTest {
      */
     protected static synchronized void disableAndDropNonSystemTables() throws Exception {
         if (driver == null) return;
-        Admin admin = driver.getConnectionQueryServices(null, null).getAdmin();
+        Admin admin = driver.getConnectionQueryServices(getUrl(), new Properties()).getAdmin();
         try {
-            TableDescriptor[] tables = admin.listTables();
+            List<TableDescriptor> tables = admin.listTableDescriptors();
             for (TableDescriptor table : tables) {
                 String schemaName = SchemaUtil.getSchemaNameFromFullName(table.getTableName().getName());
                 if (!QueryConstants.SYSTEM_SCHEMA_NAME.equals(schemaName)) {
@@ -1694,7 +1726,7 @@ public abstract class BaseTest {
 
         LOGGER.info("Disabled and dropped {} tables in {} ms", tableCount, endTime-startTime);
     }
-    
+
     public static void assertOneOfValuesEqualsResultSet(ResultSet rs, List<List<Object>>... expectedResultsArray) throws SQLException {
         List<List<Object>> results = Lists.newArrayList();
         while (rs.next()) {
@@ -1765,25 +1797,26 @@ public abstract class BaseTest {
         String upsert = "UPSERT INTO " + fullTableName
                 + " VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
         PreparedStatement stmt = conn.prepareStatement(upsert);
+        //varchar_pk
         stmt.setString(1, firstRowInBatch ? "firstRowInBatch_" : "" + "varchar"+index);
-        stmt.setString(2, "char"+index);
-        stmt.setInt(3, index);
-        stmt.setLong(4, index);
-        stmt.setBigDecimal(5, new BigDecimal(index));
+        stmt.setString(2, "char"+index); // char_pk
+        stmt.setInt(3, index); // int_pk
+        stmt.setLong(4, index); // long_pk
+        stmt.setBigDecimal(5, new BigDecimal(index)); // decimal_pk
         Date date = DateUtil.parseDate("2015-01-01 00:00:00");
-        stmt.setDate(6, date);
-        stmt.setString(7, "varchar_a");
-        stmt.setString(8, "chara");
-        stmt.setInt(9, index+1);
-        stmt.setLong(10, index+1);
-        stmt.setBigDecimal(11, new BigDecimal(index+1));
-        stmt.setDate(12, date);
-        stmt.setString(13, "varchar_b");
-        stmt.setString(14, "charb");
-        stmt.setInt(15, index+2);
-        stmt.setLong(16, index+2);
-        stmt.setBigDecimal(17, new BigDecimal(index+2));
-        stmt.setDate(18, date);
+        stmt.setDate(6, date); // date_pk
+        stmt.setString(7, "varchar_a"); // a.varchar_col1
+        stmt.setString(8, "chara"); // a.char_col1
+        stmt.setInt(9, index+1); // a.int_col1
+        stmt.setLong(10, index+1); // a.long_col1
+        stmt.setBigDecimal(11, new BigDecimal(index+1)); // a.decimal_col1
+        stmt.setDate(12, date); // a.date1
+        stmt.setString(13, "varchar_b"); // b.varchar_col2
+        stmt.setString(14, "charb"); // b.char_col2
+        stmt.setInt(15, index+2); // b.int_col2
+        stmt.setLong(16, index+2); // b.long_col2
+        stmt.setBigDecimal(17, new BigDecimal(index+2)); // b.decimal_col2
+        stmt.setDate(18, date); // b.date2
         stmt.executeUpdate();
     }
 
@@ -1933,7 +1966,7 @@ public abstract class BaseTest {
     /**
      * Returns true if the region contains atleast one of the metadata rows we are interested in
      */
-    protected static boolean regionContainsMetadataRows(HRegionInfo regionInfo,
+    protected static boolean regionContainsMetadataRows(RegionInfo regionInfo,
             List<byte[]> metadataRowKeys) {
         for (byte[] rowKey : metadataRowKeys) {
             if (regionInfo.containsRow(rowKey)) {
@@ -1962,19 +1995,19 @@ public abstract class BaseTest {
         }
         List<RegionInfo> regionInfoList = admin.getRegions(fullTableName);
         assertEquals(splitPoints.size(), regionInfoList.size());
-        HashMap<ServerName, List<HRegionInfo>> serverToRegionsList = Maps.newHashMapWithExpectedSize(NUM_SLAVES_BASE);
+        HashMap<ServerName, List<RegionInfo>> serverToRegionsList = Maps.newHashMapWithExpectedSize(NUM_SLAVES_BASE);
         Deque<ServerName> availableRegionServers = new ArrayDeque<ServerName>(NUM_SLAVES_BASE);
         for (int i=0; i<NUM_SLAVES_BASE; ++i) {
             availableRegionServers.push(util.getHBaseCluster().getRegionServer(i).getServerName());
         }
-        List<HRegionInfo> tableRegions =
-                admin.getTableRegions(fullTableName);
-        for (HRegionInfo hRegionInfo : tableRegions) {
+        List<RegionInfo> tableRegions =
+                admin.getRegions(fullTableName);
+        for (RegionInfo hRegionInfo : tableRegions) {
             // filter on regions we are interested in
             if (regionContainsMetadataRows(hRegionInfo, splitPoints)) {
                 ServerName serverName = am.getRegionStates().getRegionServerOfRegion(hRegionInfo);
                 if (!serverToRegionsList.containsKey(serverName)) {
-                    serverToRegionsList.put(serverName, new ArrayList<HRegionInfo>());
+                    serverToRegionsList.put(serverName, new ArrayList<RegionInfo>());
                 }
                 serverToRegionsList.get(serverName).add(hRegionInfo);
                 availableRegionServers.remove(serverName);
@@ -1982,8 +2015,8 @@ public abstract class BaseTest {
         }
         assertFalse("No region servers available to move regions on to ",
                 availableRegionServers.isEmpty());
-        for (Entry<ServerName, List<HRegionInfo>> entry : serverToRegionsList.entrySet()) {
-            List<HRegionInfo> regions = entry.getValue();
+        for (Entry<ServerName, List<RegionInfo>> entry : serverToRegionsList.entrySet()) {
+            List<RegionInfo> regions = entry.getValue();
             if (regions.size()>1) {
                 for (int i=1; i< regions.size(); ++i) {
                     moveRegion(regions.get(i), entry.getKey(), availableRegionServers.pop());
@@ -1993,12 +2026,12 @@ public abstract class BaseTest {
 
         // verify each region is on its own region server
         tableRegions =
-                admin.getTableRegions(fullTableName);
+                admin.getRegions(fullTableName);
         Set<ServerName> serverNames = Sets.newHashSet();
-        for (HRegionInfo hRegionInfo : tableRegions) {
+        for (RegionInfo regionInfo : tableRegions) {
             // filter on regions we are interested in
-            if (regionContainsMetadataRows(hRegionInfo, splitPoints)) {
-                ServerName serverName = am.getRegionStates().getRegionServerOfRegion(hRegionInfo);
+            if (regionContainsMetadataRows(regionInfo, splitPoints)) {
+                ServerName serverName = am.getRegionStates().getRegionServerOfRegion(regionInfo);
                 if (!serverNames.contains(serverName)) {
                     serverNames.add(serverName);
                 }
@@ -2038,7 +2071,7 @@ public abstract class BaseTest {
     /**
      * Ensures each region of SYSTEM.CATALOG is on a different region server
      */
-    private static void moveRegion(HRegionInfo regionInfo, ServerName srcServerName, ServerName dstServerName) throws Exception  {
+    private static void moveRegion(RegionInfo regionInfo, ServerName srcServerName, ServerName dstServerName) throws Exception  {
         Admin admin = driver.getConnectionQueryServices(getUrl(), TestUtil.TEST_PROPERTIES).getAdmin();
         HBaseTestingUtility util = getUtility();
         MiniHBaseCluster cluster = util.getHBaseCluster();
@@ -2048,7 +2081,7 @@ public abstract class BaseTest {
         HRegionServer dstServer = util.getHBaseCluster().getRegionServer(dstServerName);
         HRegionServer srcServer = util.getHBaseCluster().getRegionServer(srcServerName);
         byte[] encodedRegionNameInBytes = regionInfo.getEncodedNameAsBytes();
-        admin.move(encodedRegionNameInBytes, Bytes.toBytes(dstServer.getServerName().getServerName()));
+        admin.move(encodedRegionNameInBytes, dstServer.getServerName());
         while (dstServer.getOnlineRegion(regionInfo.getRegionName()) == null
                 || dstServer.getRegionsInTransitionInRS().containsKey(encodedRegionNameInBytes)
                 || srcServer.getRegionsInTransitionInRS().containsKey(encodedRegionNameInBytes)) {
@@ -2142,5 +2175,43 @@ public abstract class BaseTest {
             }
         }
         return false;
+    }
+
+    protected Long queryTableLevelMaxLookbackAge(String fullTableName) throws Exception {
+        try(Connection conn = DriverManager.getConnection(getUrl())) {
+            PhoenixConnection pconn = conn.unwrap(PhoenixConnection.class);
+            return pconn.getTableNoCache(fullTableName).getMaxLookbackAge();
+        }
+    }
+
+    public void deleteAllRows(Connection conn, TableName tableName) throws SQLException,
+            IOException, InterruptedException {
+        Scan scan = new Scan();
+        Admin admin = conn.unwrap(PhoenixConnection.class).getQueryServices().
+                getAdmin();
+        org.apache.hadoop.hbase.client.Connection hbaseConn = admin.getConnection();
+        Table table = hbaseConn.getTable(tableName);
+        boolean deletedRows = false;
+        try (ResultScanner scanner = table.getScanner(scan)) {
+            for (Result r : scanner) {
+                Delete del = new Delete(r.getRow());
+                table.delete(del);
+                deletedRows = true;
+            }
+        } catch (Exception e) {
+            //if the table doesn't exist, we have no rows to delete. Easier to catch
+            //than to pre-check for existence
+        }
+        //don't flush/compact if we didn't write anything, because we'll hang forever
+        if (deletedRows) {
+            getUtility().getAdmin().flush(tableName);
+            TestUtil.majorCompact(getUtility(), tableName);
+        }
+    }
+
+    static public void resetIndexRegionObserverFailPoints() {
+        IndexRegionObserver.setFailPreIndexUpdatesForTesting(false);
+        IndexRegionObserver.setFailDataTableUpdatesForTesting(false);
+        IndexRegionObserver.setFailPostIndexUpdatesForTesting(false);
     }
 }

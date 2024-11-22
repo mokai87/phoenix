@@ -178,6 +178,9 @@ public class ViewIndexIT extends SplitSystemCatalogIT {
         try (Connection conn1 = getConnection();
              Connection conn2 = getConnection()){
             createBaseTable(conn1, schemaName, tableName, false, null, null, true);
+            if (isNamespaceMapped) {
+                conn1.createStatement().execute("CREATE SCHEMA IF NOT EXISTS " + viewSchemaName);
+            }
             conn1.createStatement().execute("CREATE VIEW " + fullViewName + " AS SELECT * FROM " + fullTableName);
             conn1.createStatement().execute("CREATE INDEX " + indexName + " ON " + fullViewName + " (v1)");
             conn2.createStatement().executeQuery("SELECT * FROM " + fullTableName).next();
@@ -198,11 +201,16 @@ public class ViewIndexIT extends SplitSystemCatalogIT {
 		String indexName = "IND_" + generateUniqueName();
         String fullTableName = SchemaUtil.getTableName(SCHEMA1, tableName);
         String fullViewName = SchemaUtil.getTableName(SCHEMA2, generateUniqueName());
+        String fullIndexName = SchemaUtil.getTableName(SCHEMA2, indexName);
 
         try (Connection conn = getConnection();
              Connection conn1 = getTenantConnection("10")) {
 
             createBaseTable(conn, SCHEMA1, tableName, true, null, null, true);
+            if (isNamespaceMapped) {
+                conn.createStatement().execute("CREATE SCHEMA IF NOT EXISTS " + SCHEMA2);
+            }
+
             PreparedStatement stmt = conn.prepareStatement(
                 "UPSERT INTO " + fullTableName
                     + " VALUES(?,?,?,?,?)");
@@ -242,7 +250,9 @@ public class ViewIndexIT extends SplitSystemCatalogIT {
             String sql = "SELECT * FROM " + fullViewName + " WHERE v2 = 100";
             ResultSet rs = conn1.prepareStatement("EXPLAIN " + sql).executeQuery();
             assertEquals(
-                "CLIENT PARALLEL 1-WAY RANGE SCAN OVER " + SchemaUtil.getPhysicalTableName(Bytes.toBytes(fullTableName), isNamespaceMapped) + " [1,'10',100]\n" +
+                "CLIENT PARALLEL 1-WAY RANGE SCAN OVER " + fullIndexName + "(" +
+                        SchemaUtil.getPhysicalTableName(Bytes.toBytes(fullTableName),
+                                 isNamespaceMapped) + ") [1,'10',100]\n" +
                     "    SERVER MERGE [0.V1]\n" +
                     "    SERVER FILTER BY FIRST KEY ONLY\n" +
                     "CLIENT MERGE SORT", QueryUtil.getExplainPlan(rs));
@@ -303,7 +313,7 @@ public class ViewIndexIT extends SplitSystemCatalogIT {
             createViewIndex(conn, schemaName, globalViewIdx, globalView, "K1");
             //now check that the right coprocs are installed
             Admin admin = conn.getQueryServices().getAdmin();
-            TableDescriptor td = admin.getTableDescriptor(TableName.valueOf(
+            TableDescriptor td = admin.getDescriptor(TableName.valueOf(
                 MetaDataUtil.getViewIndexPhysicalName(SchemaUtil.getPhysicalHBaseTableName(
                     schemaName, baseTable, isNamespaceMapped).getString())));
             assertTrue(td.hasCoprocessor(GlobalIndexChecker.class.getName()));
@@ -482,11 +492,13 @@ public class ViewIndexIT extends SplitSystemCatalogIT {
         conn.createStatement().execute(viewDdl);
         conn.createStatement().execute(indexDdl);
 
-        String childViewName = String.format("S_%s.\"%s\"", generateUniqueName(), keyPrefix);
+        String childViewNameSchema = String.format("S_%s", generateUniqueName());
+        String childViewName = String.format("%s.\"%s\"", childViewNameSchema, keyPrefix);
         String viewChildDDl = String.format("CREATE VIEW IF NOT EXISTS %s AS SELECT * FROM %s", childViewName, fullViewName);
         Connection conn2 = null;
         if (isNamespaceMapped) {
             conn2 = getTenantConnection(TENANT1);
+            conn2.createStatement().execute("CREATE SCHEMA IF NOT EXISTS " + childViewNameSchema);
         } else {
             conn2 = conn;
         }
@@ -580,6 +592,8 @@ public class ViewIndexIT extends SplitSystemCatalogIT {
                  Connection tsConn3 = DriverManager.getConnection(getUrl(), tsProps)) {
                 if (isNamespaceMapped) {
                     conn.createStatement().execute("CREATE SCHEMA IF NOT EXISTS " + baseSchemaName);
+                    conn.createStatement().execute("CREATE SCHEMA IF NOT EXISTS " + viewSchemaName);
+                    conn.createStatement().execute("CREATE SCHEMA IF NOT EXISTS " + tsViewSchemaName);
                 }
                 conn.createStatement().execute(
                     "CREATE TABLE " + baseFullName + "(\n" + "    ORGANIZATION_ID CHAR(15) NOT NULL,\n"
@@ -697,6 +711,7 @@ public class ViewIndexIT extends SplitSystemCatalogIT {
             c.setAutoCommit(true);
             if (isNamespaceMapped) {
                 c.createStatement().execute("CREATE SCHEMA IF NOT EXISTS " + SCHEMA1);
+                c.createStatement().execute("CREATE SCHEMA IF NOT EXISTS " + SCHEMA2);
             }
             s.execute("CREATE TABLE " + tableName + " (COL1 VARCHAR PRIMARY KEY, CF.COL2 VARCHAR)");
             s.executeUpdate("UPSERT INTO " + tableName + " VALUES ('AAA', 'BBB')");
@@ -740,16 +755,16 @@ public class ViewIndexIT extends SplitSystemCatalogIT {
         String tenantViewName = "TV_" + generateUniqueName();
         String globalViewIndexName = "GV_" + generateUniqueName();
         String tenantViewIndexName = "TV_" + generateUniqueName();
-        try(Connection globalConn = getConnection();
-            Connection tenantConn = getTenantConnection(TENANT1)) {
+        try(PhoenixConnection globalConn = getConnection();
+                PhoenixConnection tenantConn = (PhoenixConnection) getTenantConnection(TENANT1)) {
             createBaseTable(globalConn, SCHEMA1, tableName, true, 0, null, true);
             createView(globalConn, SCHEMA1, globalViewName, tableName);
             createViewIndex(globalConn, SCHEMA1, globalViewIndexName, globalViewName, "v1");
             createView(tenantConn, SCHEMA1, tenantViewName, tableName);
             createViewIndex(tenantConn, SCHEMA1, tenantViewIndexName, tenantViewName, "v2");
 
-            PTable globalViewIndexTable = PhoenixRuntime.getTable(globalConn, SCHEMA1 + "." + globalViewIndexName);
-            PTable tenantViewIndexTable = PhoenixRuntime.getTable(tenantConn, SCHEMA1 + "." + tenantViewIndexName);
+            PTable globalViewIndexTable = globalConn.getTable(SCHEMA1 + "." + globalViewIndexName);
+            PTable tenantViewIndexTable = tenantConn.getTable(SCHEMA1 + "." + tenantViewIndexName);
             Assert.assertNotNull(globalViewIndexTable);
             Assert.assertNotNull(tenantViewIndexName);
             Assert.assertNotEquals(globalViewIndexTable.getViewIndexId(), tenantViewIndexTable.getViewIndexId());
@@ -824,7 +839,8 @@ public class ViewIndexIT extends SplitSystemCatalogIT {
         final String dataTableFullName = SchemaUtil.getTableName(schemaName, tableName);
         final String viewFullName = SchemaUtil.getTableName(schemaName, viewName);
         final String viewIndexFullName = SchemaUtil.getTableName(schemaName, viewIndexName);
-        try (Connection conn = DriverManager.getConnection(getUrl(), props)) {
+        try (PhoenixConnection conn = (PhoenixConnection) DriverManager.getConnection(getUrl(),
+                props)) {
             String version = "V1.0";
             CreateTableIT.testCreateTableSchemaVersionAndTopicNameHelper(conn, schemaName, tableName, version, null);
             String createViewSql = "CREATE VIEW " + viewFullName + " AS SELECT * FROM " + dataTableFullName +
@@ -833,7 +849,7 @@ public class ViewIndexIT extends SplitSystemCatalogIT {
             String createViewIndexSql = "CREATE INDEX " + viewIndexName + " ON "
                     + viewFullName + " (ID2) INCLUDE (ID1) SCHEMA_VERSION='" + version + "'";
             conn.createStatement().execute(createViewIndexSql);
-            PTable viewIndex = PhoenixRuntime.getTableNoCache(conn, viewIndexFullName);
+            PTable viewIndex = conn.getTableNoCache(viewIndexFullName);
             assertEquals(version, viewIndex.getSchemaVersion());
         }
     }

@@ -62,6 +62,67 @@ public class SaltedTableIT extends BaseSaltedTableIT {
         }
     }
 
+    @Test public void testPointLookupOnSaltedTable() throws Exception {
+        Properties props = PropertiesUtil.deepCopy(TEST_PROPERTIES);
+        try (Connection conn = DriverManager.getConnection(getUrl(), props)) {
+            String tableName = generateUniqueName();
+            String
+                    query =
+                    "create table " + tableName + " (a_integer integer not null "
+                            + "CONSTRAINT pk PRIMARY KEY (a_integer)) SALT_BUCKETS = 10";
+            conn.createStatement().execute(query);
+            PreparedStatement
+                    stmt =
+                    conn.prepareStatement("upsert into " + tableName + " values(?)");
+            stmt.setInt(1, 1);
+            stmt.execute();
+            stmt.setInt(1, 2);
+            stmt.execute();
+            stmt.setInt(1, 3);
+            stmt.execute();
+            conn.commit();
+            query = "select * from " + tableName + " where a_integer = 1";
+            ResultSet rs = conn.createStatement().executeQuery(query);
+            assertTrue(rs.next());
+            assertEquals(1, rs.getInt("a_integer"));
+            query = "explain " + query;
+            rs = conn.createStatement().executeQuery(query);
+            assertTrue(QueryUtil.getExplainPlan(rs).contains("POINT LOOKUP ON 1 KEY"));
+        }
+    }
+
+    @Test
+    public void testPointLookupOnSaltedTable2() throws Exception {
+        Properties props = PropertiesUtil.deepCopy(TEST_PROPERTIES);
+        try (Connection conn = DriverManager.getConnection(getUrl(), props)) {
+            String tableName = generateUniqueName();
+            String query =
+                "CREATE TABLE " + tableName + " (A integer not null, B integer "
+                    + "CONSTRAINT pk PRIMARY KEY (A)) SALT_BUCKETS = 10";
+            conn.createStatement().execute(query);
+            PreparedStatement stmt =
+                conn.prepareStatement("UPSERT INTO " + tableName + " values(?, ?)");
+            for (int i = 0; i < 1000; i++) {
+                stmt.setInt(1, i);
+                stmt.setInt(2, i + 10);
+                stmt.execute();
+            }
+            conn.commit();
+            for (int i = 0; i < 1000; i++) {
+                query = "SELECT * FROM " + tableName + " WHERE A = " + i;
+                ResultSet rs = conn.createStatement().executeQuery(query);
+                assertTrue(rs.next());
+                assertEquals(i, rs.getInt("A"));
+                assertEquals(i + 10, rs.getInt("B"));
+                assertFalse(rs.next());
+                query = "explain " + query;
+                rs = conn.createStatement().executeQuery(query);
+                assertTrue(QueryUtil.getExplainPlan(rs)
+                    .contains("CLIENT PARALLEL 1-WAY POINT LOOKUP ON 1 KEY OVER"));
+            }
+        }
+    }
+
     @Test
     public void testTableWithSplit() throws Exception {
         try {

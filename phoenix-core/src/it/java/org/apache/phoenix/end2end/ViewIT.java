@@ -21,6 +21,7 @@ import static org.apache.phoenix.thirdparty.com.google.common.collect.Lists
         .newArrayListWithExpectedSize;
 import static org.apache.phoenix.coprocessor.PhoenixMetaDataCoprocessorHost
         .PHOENIX_META_DATA_COPROCESSOR_CONF_KEY;
+import static org.apache.phoenix.exception.SQLExceptionCode.MAX_LOOKBACK_AGE_SUPPORTED_FOR_TABLES_ONLY;
 import static org.apache.phoenix.util.TestUtil.analyzeTable;
 import static org.apache.phoenix.util.TestUtil.getAllSplits;
 import static org.junit.Assert.assertArrayEquals;
@@ -29,6 +30,7 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
+import static org.junit.Assert.assertThrows;
 
 import java.math.BigDecimal;
 import java.sql.Connection;
@@ -44,8 +46,14 @@ import java.util.List;
 import java.util.Map;
 import java.util.Properties;
 
+import org.apache.hadoop.hbase.HBaseTestingUtility;
+import org.apache.hadoop.hbase.NamespaceDescriptor;
 import org.apache.hadoop.hbase.TableName;
+import org.apache.hadoop.hbase.client.Admin;
+import org.apache.hadoop.hbase.client.ColumnFamilyDescriptorBuilder;
 import org.apache.hadoop.hbase.client.Scan;
+import org.apache.hadoop.hbase.client.TableDescriptorBuilder;
+import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.Pair;
 import org.apache.phoenix.compile.ExplainPlan;
 import org.apache.phoenix.compile.ExplainPlanAttributes;
@@ -59,10 +67,15 @@ import org.apache.phoenix.query.QueryServices;
 import org.apache.phoenix.schema.PTable;
 import org.apache.phoenix.schema.PTableImpl;
 import org.apache.phoenix.schema.ReadOnlyTableException;
+import org.apache.phoenix.schema.ColumnNotFoundException;
+import org.apache.phoenix.schema.SchemaNotFoundException;
+import org.apache.phoenix.schema.TableNotFoundException;
+import org.apache.phoenix.schema.TableAlreadyExistsException;
 import org.apache.phoenix.schema.export.DefaultSchemaRegistryRepository;
 import org.apache.phoenix.schema.export.DefaultSchemaWriter;
 import org.apache.phoenix.schema.export.SchemaRegistryRepository;
 import org.apache.phoenix.schema.export.SchemaRegistryRepositoryFactory;
+import org.apache.phoenix.schema.types.PVarbinary;
 import org.apache.phoenix.thirdparty.com.google.common.collect.Lists;
 import org.apache.phoenix.transaction.PhoenixTransactionProvider.Feature;
 import org.apache.phoenix.transaction.TransactionFactory;
@@ -73,6 +86,7 @@ import org.junit.experimental.categories.Category;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
 import org.junit.runners.Parameterized.Parameters;
+
 
 import org.apache.phoenix.thirdparty.com.google.common.collect.Maps;
 
@@ -271,7 +285,46 @@ public class ViewIT extends SplitSystemCatalogIT {
             assertEquals(4, count);
         }
     }
-    
+
+    @Test
+    public void testCreateMappedViewWithHbaseNamespace() throws Exception {
+        Properties props = new Properties();
+        props.setProperty(QueryServices.IS_NAMESPACE_MAPPING_ENABLED,
+                Boolean.TRUE.toString());
+        Connection conn1 = DriverManager.getConnection(getUrl(), props);
+        conn1.setAutoCommit(true);
+
+        HBaseTestingUtility testUtil = getUtility();
+        Admin admin = testUtil.getAdmin();
+
+        String nameSpace = generateUniqueName();
+        admin.createNamespace(NamespaceDescriptor.create(nameSpace).build());
+
+        String tableNameStr = generateUniqueName();
+        TableName tableName = TableName.valueOf(nameSpace, tableNameStr);
+        String familyNameStr = "colFam1";
+        TableDescriptorBuilder builder = TableDescriptorBuilder.newBuilder(tableName);
+        builder.setColumnFamily(ColumnFamilyDescriptorBuilder.of(
+                familyNameStr));
+        admin.createTable(builder.build());
+
+
+        String viewName = SchemaUtil.getTableName(nameSpace, tableNameStr);
+        try {
+            conn1.createStatement().execute("CREATE VIEW " + viewName +
+                    " (pk VARCHAR PRIMARY KEY, \"colFam1\".\"lastname\" VARCHAR )");
+        } catch (SchemaNotFoundException e) {
+            assertEquals(nameSpace, e.getSchemaName());
+            assertEquals("ERROR 722 (43M05): Schema does not exist schemaName="
+                            + nameSpace,
+                    e.getMessage());
+        }
+
+        conn1.createStatement().execute("CREATE SCHEMA IF NOT EXISTS " + nameSpace);
+        conn1.createStatement().execute("CREATE VIEW " + viewName +
+                " (pk VARCHAR PRIMARY KEY, \"colFam1\".\"lastname\" VARCHAR )");
+    }
+
     @Test
     public void testViewWithCurrentDate() throws Exception {
         try (Connection conn = DriverManager.getConnection(getUrl());
@@ -344,7 +397,7 @@ public class ViewIT extends SplitSystemCatalogIT {
             String createViewSql = "CREATE VIEW " + viewFullName + " AS SELECT * FROM " + dataTableFullName +
                     " SCHEMA_VERSION='" + version + "', STREAMING_TOPIC_NAME='" + topicName + "'";
             conn.createStatement().execute(createViewSql);
-            PTable view = PhoenixRuntime.getTableNoCache(conn, viewFullName);
+            PTable view = conn.unwrap(PhoenixConnection.class).getTableNoCache(viewFullName);
             assertEquals(version, view.getSchemaVersion());
             assertEquals(topicName, view.getStreamingTopicName());
         }
@@ -368,7 +421,7 @@ public class ViewIT extends SplitSystemCatalogIT {
                 " CONSTRAINT NAME_PK PRIMARY KEY (id, col1, col2)) " +
                 "MULTI_TENANT=true, CHANGE_DETECTION_ENABLED=true";
             conn.createStatement().execute(ddl);
-            PTable table = PhoenixRuntime.getTableNoCache(conn, fullTableName);
+            PTable table = conn.getTableNoCache(fullTableName);
             assertTrue(table.isChangeDetectionEnabled());
             AlterTableIT.verifySchemaExport(table, getUtility().getConfiguration());
 
@@ -377,7 +430,7 @@ public class ViewIT extends SplitSystemCatalogIT {
                 " AS SELECT * FROM " + fullTableName + " CHANGE_DETECTION_ENABLED=true";
 
             conn.createStatement().execute(globalViewDdl);
-            globalView = PhoenixRuntime.getTableNoCache(conn, fullGlobalViewName);
+            globalView = conn.getTableNoCache(fullGlobalViewName);
             assertTrue(globalView.isChangeDetectionEnabled());
             PTable globalViewWithParents = ViewUtil.addDerivedColumnsFromParent(conn, globalView, table);
             //   base column count doesn't get set properly
@@ -393,7 +446,7 @@ public class ViewIT extends SplitSystemCatalogIT {
                 " (id3 VARCHAR PRIMARY KEY, col4 VARCHAR NULL) " +
                 " AS SELECT * FROM " + fullGlobalViewName + " CHANGE_DETECTION_ENABLED=true";
             tenantConn.createStatement().execute(tenantViewDdl);
-            PTable tenantView = PhoenixRuntime.getTableNoCache(tenantConn, fullTenantViewName);
+            PTable tenantView = tenantConn.getTableNoCache(fullTenantViewName);
             assertTrue(tenantView.isChangeDetectionEnabled());
             PTable tenantViewWithParents = ViewUtil.addDerivedColumnsFromParent(tenantConn, tenantView, globalView);
             AlterTableIT.verifySchemaExport(tenantViewWithParents, getUtility().getConfiguration());
@@ -460,7 +513,7 @@ public class ViewIT extends SplitSystemCatalogIT {
             String viewDdl = "CREATE VIEW " + fullViewName + " AS SELECT * FROM " + fullTableName
                 + " CHANGE_DETECTION_ENABLED=true";
             conn.createStatement().execute(viewDdl);
-            PTable view = PhoenixRuntime.getTableNoCache(conn, fullViewName);
+            PTable view = conn.unwrap(PhoenixConnection.class).getTableNoCache(fullViewName);
             assertTrue(view.isChangeDetectionEnabled());
             assertEquals(DefaultSchemaRegistryRepository.getSchemaId(view),
                 view.getExternalSchemaId());
@@ -543,7 +596,8 @@ public class ViewIT extends SplitSystemCatalogIT {
             // Assert that in either case (local & global) that index from
             // physical table used for query on view.
             if (localIndex) {
-                assertEquals(fullTableName, explainPlanAttributes.getTableName());
+                assertEquals(fullIndexName1 + "(" + fullTableName + ")",
+                        explainPlanAttributes.getTableName());
                 assertEquals(" [1,1,100] - [1,2,109]",
                     explainPlanAttributes.getKeyRanges());
                 assertEquals("CLIENT MERGE SORT",
@@ -610,9 +664,9 @@ public class ViewIT extends SplitSystemCatalogIT {
             } catch (Exception ignore) {
             }
             // Check view inherits index, but child view doesn't
-            PTable table = PhoenixRuntime.getTable(conn, fullViewName);
+            PTable table = conn.unwrap(PhoenixConnection.class).getTable(fullViewName);
             assertEquals(1, table.getIndexes().size());
-            table = PhoenixRuntime.getTable(conn, fullChildViewName);
+            table = conn.unwrap(PhoenixConnection.class).getTable(fullChildViewName);
             assertEquals(0, table.getIndexes().size());
 
             ResultSet rs = stmt.executeQuery("select count(*) from "
@@ -643,7 +697,6 @@ public class ViewIT extends SplitSystemCatalogIT {
                     + "PRIMARY KEY) "
                     + "AS SELECT * FROM " + fullTableName + " WHERE K1 = 1";
             stmt.execute(ddl);
-
             // assert PK metadata
             ResultSet rs = conn.getMetaData().getPrimaryKeys(null,
                     SchemaUtil.getSchemaNameFromFullName(fullViewName),
@@ -895,6 +948,67 @@ public class ViewIT extends SplitSystemCatalogIT {
         }
     }
 
+    @Test
+    //creating view with same name on top of a table with a non existent column
+    public void testCreateViewWithUndefinedSameColumnName() throws Exception {
+        String fullViewName = generateUniqueName();
+
+        try (Connection conn = DriverManager.getConnection(getUrl());
+             Statement stmt = conn.createStatement()) {
+            String ddl = "CREATE VIEW " + fullViewName +
+                    " AS SELECT * FROM " + fullViewName +
+                    " WHERE " + fullViewName + " = 1";
+            stmt.execute(ddl);
+            fail("Should have thrown an exception");
+        } catch (ColumnNotFoundException columnException) {
+            assertEquals("Undefined column",
+                    SQLExceptionCode.COLUMN_NOT_FOUND
+                    .getErrorCode(), columnException.getErrorCode());
+            assertEquals(fullViewName, columnException.getColumnName());
+        }
+    }
+
+    @Test
+    //creating view with same name on top of a non existent table
+    public void testCreateViewOnTopOfUndefinedTableWithSameName() throws Exception {
+        try (Connection conn = DriverManager.getConnection(getUrl());
+             Statement stmt = conn.createStatement()) {
+
+            String fullViewName = generateUniqueName();
+            String ddl = "CREATE VIEW " +  fullViewName +
+                    " AS SELECT * FROM " + fullViewName;
+            stmt.execute(ddl);
+            fail("Should have thrown an exception");
+        } catch (TableNotFoundException tableException) {
+            assertEquals("Table Undefined",
+                    SQLExceptionCode.TABLE_UNDEFINED.getErrorCode(),
+                    tableException.getErrorCode());
+        }
+    }
+
+    @Test
+    //creating view with same name as the parent table
+    public void testCreateViewOnTopOfTableWithSameName() throws Exception {
+        try (Connection conn = DriverManager.getConnection(getUrl());
+             Statement stmt = conn.createStatement()) {
+
+            String fullTableName = generateUniqueName();
+            String ddl = "CREATE TABLE " + fullTableName
+                    + " (k1 INTEGER NOT NULL, k2 INTEGER NOT NULL, v1 DECIMAL, "
+                    + "CONSTRAINT pk PRIMARY KEY (k1, k2))" + tableDDLOptions;
+            stmt.execute(ddl);
+
+            ddl = "CREATE VIEW " + fullTableName + "(v2 VARCHAR, k3 VARCHAR "
+                    + "PRIMARY KEY) "
+                    + "AS SELECT * FROM " + fullTableName + " WHERE K1 = 1";
+            stmt.execute(ddl);
+            fail("Should have thrown an exception");
+        } catch (TableAlreadyExistsException tableException) {
+            assertEquals("Table already exists",
+                    SQLExceptionCode.TABLE_ALREADY_EXIST
+                    .getErrorCode(), tableException.getErrorCode());
+        }
+    }
     private void validate(String viewName, Connection tenantConn,
             String[] whereClauseArray,
             long[] expectedArray) throws SQLException {
@@ -1021,6 +1135,8 @@ public class ViewIT extends SplitSystemCatalogIT {
         try (Connection conn = DriverManager.getConnection(getUrl());
                 Statement stmt = conn.createStatement()) {
             String viewIndexName1 = "I_" + generateUniqueName();
+            String schemaName = SchemaUtil.getSchemaNameFromFullName(viewName);
+            String viewIndexFullName1 = SchemaUtil.getTableName(schemaName, viewIndexName1);
             String viewIndexPhysicalName = MetaDataUtil.
                     getViewIndexPhysicalName(fullTableName);
             if (localIndex) {
@@ -1064,11 +1180,13 @@ public class ViewIT extends SplitSystemCatalogIT {
                 assertEquals("PARALLEL "
                         + (saltBuckets == null ? 1 : saltBuckets) + "-WAY",
                     explainPlanAttributes.getIteratorTypeAndScanSize());
-                assertEquals(fullTableName,
+                assertEquals(viewIndexFullName1 + "(" + fullTableName + ")",
                     explainPlanAttributes.getTableName());
                 assertEquals(" [1,51]", explainPlanAttributes.getKeyRanges());
-                assertEquals("SERVER FILTER BY FIRST KEY ONLY",
-                    explainPlanAttributes.getServerWhereFilter());
+                assertTrue(explainPlanAttributes.getServerWhereFilter().
+                        equals("SERVER FILTER BY FIRST KEY ONLY") ||
+                        explainPlanAttributes.getServerWhereFilter().
+                                equals("SERVER FILTER BY EMPTY COLUMN ONLY"));
                 assertEquals("CLIENT MERGE SORT",
                     explainPlanAttributes.getClientSortAlgo());
             } else {
@@ -1083,8 +1201,9 @@ public class ViewIT extends SplitSystemCatalogIT {
                 } else {
                     assertEquals("PARALLEL " + saltBuckets + "-WAY",
                         explainPlanAttributes.getIteratorTypeAndScanSize());
-                    assertEquals(" [0," + Short.MIN_VALUE + ",51] - ["
-                        + (saltBuckets - 1) + "," + Short.MIN_VALUE + ",51]",
+                    assertEquals(" [X'00'," + Short.MIN_VALUE + ",51] - ["
+                        + PVarbinary.INSTANCE.toStringLiteral(new byte[] {(byte)(saltBuckets - 1)})
+                        + "," + Short.MIN_VALUE + ",51]",
                         explainPlanAttributes.getKeyRanges());
                     assertEquals("CLIENT MERGE SORT",
                         explainPlanAttributes.getClientSortAlgo());
@@ -1092,6 +1211,7 @@ public class ViewIT extends SplitSystemCatalogIT {
             }
 
             String viewIndexName2 = "I_" + generateUniqueName();
+            String viewIndexFullName2 = SchemaUtil.getTableName(schemaName, viewIndexName2);
             if (localIndex) {
                 stmt.execute("CREATE LOCAL INDEX " + viewIndexName2 + " on "
                         + viewName + "(s)");
@@ -1126,13 +1246,15 @@ public class ViewIT extends SplitSystemCatalogIT {
             explainPlanAttributes = plan.getPlanStepsAsAttributes();
             assertEquals("RANGE SCAN ",
                 explainPlanAttributes.getExplainScanType());
-            assertEquals("SERVER FILTER BY FIRST KEY ONLY",
-                explainPlanAttributes.getServerWhereFilter());
+            assertTrue(explainPlanAttributes.getServerWhereFilter().
+                    equals("SERVER FILTER BY FIRST KEY ONLY") ||
+                    explainPlanAttributes.getServerWhereFilter().
+                            equals("SERVER FILTER BY EMPTY COLUMN ONLY"));
             if (localIndex) {
                 physicalTableName = fullTableName;
                 assertEquals("PARALLEL " + (saltBuckets == null ? 1 : saltBuckets)
                     + "-WAY", explainPlanAttributes.getIteratorTypeAndScanSize());
-                assertEquals(fullTableName,
+                assertEquals(viewIndexFullName2 + "(" + fullTableName + ")",
                     explainPlanAttributes.getTableName());
                 assertEquals(" [" + (2) + ",'foo']",
                     explainPlanAttributes.getKeyRanges());
@@ -1149,8 +1271,9 @@ public class ViewIT extends SplitSystemCatalogIT {
                 } else {
                     assertEquals("PARALLEL " + saltBuckets + "-WAY",
                         explainPlanAttributes.getIteratorTypeAndScanSize());
-                    assertEquals(" [0," + (Short.MIN_VALUE + 1) + ",'foo'] - ["
-                        + (saltBuckets - 1) + "," + (Short.MIN_VALUE + 1)
+                    assertEquals(" [X'00'," + (Short.MIN_VALUE + 1) + ",'foo'] - ["
+                        + PVarbinary.INSTANCE.toStringLiteral(new byte[] {(byte)(saltBuckets - 1)})
+                        + "," + (Short.MIN_VALUE + 1)
                         + ",'foo']", explainPlanAttributes.getKeyRanges());
                     assertEquals("CLIENT MERGE SORT",
                         explainPlanAttributes.getClientSortAlgo());
@@ -1176,4 +1299,86 @@ public class ViewIT extends SplitSystemCatalogIT {
         }
     }
 
+    @Test
+    public void testCreateViewWithTableLevelMaxLookbackAge() throws Exception {
+        String schemaName = generateUniqueName();
+        String dataTableName = generateUniqueName();
+        String fullTableName = SchemaUtil.getTableName(schemaName, dataTableName);
+        Long maxLookbackAge = 300L;
+        String createDdl = "CREATE TABLE " + fullTableName +
+                " (id char(1) NOT NULL PRIMARY KEY,  col1 integer) MAX_LOOKBACK_AGE="+maxLookbackAge;
+        try(Connection conn = DriverManager.getConnection(getUrl());
+            Statement stmt = conn.createStatement()) {
+            stmt.execute(createDdl);
+            assertEquals(maxLookbackAge, queryTableLevelMaxLookbackAge(fullTableName));
+            String childViewName = generateUniqueName();
+            String fullChildViewName = SchemaUtil.getTableName(schemaName, childViewName);
+            createDdl = "CREATE VIEW " + fullChildViewName + " AS SELECT * FROM " + fullTableName;
+            stmt.execute(createDdl);
+            assertEquals(maxLookbackAge, queryTableLevelMaxLookbackAge(fullChildViewName));
+            String grandChildViewName = generateUniqueName();
+            String fullGrandChildViewName = SchemaUtil.getTableName(schemaName, grandChildViewName);
+            createDdl = "CREATE VIEW " + fullGrandChildViewName + " (col2 varchar) AS SELECT * FROM " + fullChildViewName;
+            stmt.execute(createDdl);
+            assertEquals(maxLookbackAge, queryTableLevelMaxLookbackAge(fullGrandChildViewName));
+            String childViewIndexName = generateUniqueName();
+            createDdl = "CREATE INDEX " + childViewIndexName + " ON " + fullChildViewName + " (COL1)";
+            stmt.execute(createDdl);
+            assertEquals(maxLookbackAge, queryTableLevelMaxLookbackAge(
+                    SchemaUtil.getTableName(schemaName, childViewIndexName)));
+            String grandChildViewIndexName = generateUniqueName();
+            createDdl = "CREATE INDEX " + grandChildViewIndexName + " ON " + fullGrandChildViewName + " (COL2)";
+            stmt.execute(createDdl);
+            assertEquals(maxLookbackAge, queryTableLevelMaxLookbackAge(
+                    SchemaUtil.getTableName(schemaName, grandChildViewIndexName)));
+        }
+    }
+
+    @Test
+    public void testCreateInvalidViewWithTableLevelMaxLookbackAge() throws Exception {
+        String schemaName = generateUniqueName();
+        String dataTableName = generateUniqueName();
+        String fullTableName = SchemaUtil.getTableName(schemaName, dataTableName);
+        Long maxLookbackAge = 300L;
+        String createDdl = "CREATE TABLE " + fullTableName +
+                " (id char(1) NOT NULL PRIMARY KEY,  col1 integer)";
+        try(Connection conn = DriverManager.getConnection(getUrl());
+            Statement stmt = conn.createStatement()) {
+            stmt.execute(createDdl);
+            String viewName = generateUniqueName();
+            String fullViewName = SchemaUtil.getTableName(schemaName, viewName);
+            createDdl = "CREATE VIEW " + fullViewName + " AS SELECT * FROM " + fullTableName;
+            String viewOptions = " MAX_LOOKBACK_AGE=" + maxLookbackAge;
+            String createDdlWithViewOptions = createDdl + viewOptions;
+            SQLException err = assertThrows(SQLException.class, () -> stmt.execute(createDdlWithViewOptions));
+            assertEquals(MAX_LOOKBACK_AGE_SUPPORTED_FOR_TABLES_ONLY.getErrorCode(), err.getErrorCode());
+            stmt.execute(createDdl);
+            String viewIndexName = generateUniqueName();
+            createDdl = "CREATE INDEX " + viewIndexName + " ON " + fullViewName + " (COL1)";
+            String createIndexDdlWithViewOptions = createDdl + viewOptions;
+            err = assertThrows(SQLException.class, () -> stmt.execute(createIndexDdlWithViewOptions));
+            assertEquals(MAX_LOOKBACK_AGE_SUPPORTED_FOR_TABLES_ONLY.getErrorCode(), err.getErrorCode());
+        }
+    }
+
+    @Test
+    public void testMappedViewForNullMaxLookbackAge() throws Exception {
+        try(Connection conn = DriverManager.getConnection(getUrl());
+            Statement stmt = conn.createStatement()) {
+            Admin admin = conn.unwrap(PhoenixConnection.class).getQueryServices().getAdmin();
+            byte[] cfA = Bytes.toBytes(SchemaUtil.normalizeIdentifier("a"));
+            String dataTableName = generateUniqueName();
+            byte[] hbaseDataTableName = SchemaUtil.getTableNameAsBytes("", dataTableName);
+            TableDescriptorBuilder builder = TableDescriptorBuilder.newBuilder(TableName.valueOf(hbaseDataTableName));
+            builder.setColumnFamily(ColumnFamilyDescriptorBuilder.of(cfA));
+            admin.createTable(builder.build());
+            String createDdl = "CREATE VIEW " + dataTableName + " (id varchar primary key, a.col1 varchar)";
+            stmt.execute(createDdl);
+            assertNull(queryTableLevelMaxLookbackAge(dataTableName));
+            String viewIndexName = generateUniqueName();
+            createDdl = "CREATE INDEX " + viewIndexName + " ON " + dataTableName + " (a.col1)";
+            stmt.execute(createDdl);
+            assertNull(queryTableLevelMaxLookbackAge(viewIndexName));
+        }
+    }
 }

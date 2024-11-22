@@ -17,7 +17,10 @@
  */
 package org.apache.phoenix.end2end;
 
+import static org.apache.phoenix.coprocessorclient.BaseScannerRegionObserverConstants.PHOENIX_MAX_LOOKBACK_AGE_CONF_KEY;
+import static org.apache.phoenix.mapreduce.index.IndexUpgradeTool.ROLLBACK_OP;
 import static org.apache.phoenix.util.TestUtil.TEST_PROPERTIES;
+import static org.apache.phoenix.exception.SQLExceptionCode.MAX_LOOKBACK_AGE_SUPPORTED_FOR_TABLES_ONLY;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotEquals;
@@ -25,7 +28,11 @@ import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
+import static org.junit.Assert.assertThrows;
 
+import java.io.BufferedWriter;
+import java.io.File;
+import java.io.FileWriter;
 import java.io.IOException;
 import java.sql.Connection;
 import java.sql.DriverManager;
@@ -36,23 +43,35 @@ import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Properties;
+import java.util.UUID;
 
 import org.apache.hadoop.hbase.HConstants;
+import org.apache.hadoop.hbase.KeepDeletedCells;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.client.Admin;
 import org.apache.hadoop.hbase.client.ColumnFamilyDescriptor;
 import org.apache.hadoop.hbase.client.ColumnFamilyDescriptorBuilder;
-import org.apache.hadoop.hbase.ipc.PhoenixRpcSchedulerFactory;
-import org.apache.hadoop.hbase.regionserver.BloomType;
+import org.apache.hadoop.hbase.client.Get;
+import org.apache.hadoop.hbase.client.Put;
+import org.apache.hadoop.hbase.client.Result;
+import org.apache.hadoop.hbase.client.Row;
+import org.apache.hadoop.hbase.client.Table;
 import org.apache.hadoop.hbase.client.TableDescriptor;
 import org.apache.hadoop.hbase.client.TableDescriptorBuilder;
+import org.apache.hadoop.hbase.regionserver.BloomType;
+import org.apache.hadoop.hbase.util.Bytes;
+import org.apache.phoenix.coprocessor.BaseScannerRegionObserver;
 import org.apache.phoenix.exception.SQLExceptionCode;
 import org.apache.phoenix.jdbc.PhoenixConnection;
 import org.apache.phoenix.jdbc.PhoenixDatabaseMetaData;
 import org.apache.phoenix.jdbc.PhoenixStatement;
+import org.apache.phoenix.mapreduce.index.IndexUpgradeTool;
 import org.apache.phoenix.query.BaseTest;
+import org.apache.phoenix.query.ConnectionQueryServices;
 import org.apache.phoenix.query.KeyRange;
+import org.apache.phoenix.query.QueryConstants;
 import org.apache.phoenix.query.QueryServices;
 import org.apache.phoenix.query.QueryServicesOptions;
 import org.apache.phoenix.schema.ColumnAlreadyExistsException;
@@ -64,19 +83,37 @@ import org.apache.phoenix.schema.PTableType;
 import org.apache.phoenix.schema.SchemaNotFoundException;
 import org.apache.phoenix.schema.TableAlreadyExistsException;
 import org.apache.phoenix.schema.TableNotFoundException;
-import org.apache.phoenix.schema.export.DefaultSchemaRegistryRepository;
+import org.apache.phoenix.util.ByteUtil;
+import org.apache.phoenix.thirdparty.com.google.common.collect.Maps;
 import org.apache.phoenix.util.EnvironmentEdgeManager;
+import org.apache.phoenix.util.IndexUtil;
 import org.apache.phoenix.util.PhoenixRuntime;
 import org.apache.phoenix.util.PropertiesUtil;
 import org.apache.phoenix.util.QueryUtil;
 import org.apache.phoenix.util.ReadOnlyProps;
 import org.apache.phoenix.util.SchemaUtil;
 import org.apache.phoenix.util.TestUtil;
+import org.junit.Assert;
+import org.junit.BeforeClass;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
 
-@Category(ParallelStatsDisabledTest.class)
+@Category(NeedsOwnMiniClusterTest.class)
 public class CreateTableIT extends ParallelStatsDisabledIT {
+
+    @BeforeClass
+    public static synchronized void doSetup() throws Exception {
+        Map<String, String> props = Maps.newHashMapWithExpectedSize(1);
+        props.put(PHOENIX_MAX_LOOKBACK_AGE_CONF_KEY, Integer.toString(60*60)); // An hour
+        props.put(QueryServices.USE_STATS_FOR_PARALLELIZATION, Boolean.toString(false));
+        /**
+         * This test checks Table properties at ColumnFamilyDescriptor level, turing phoenix_table_ttl
+         * to false for them to test TTL and other props at HBase level. TTL being set at phoenix level
+         * is being tested in {@link TTLAsPhoenixTTLIT}
+         */
+        props.put(QueryServices.PHOENIX_TABLE_TTL_ENABLED, Boolean.toString(false));
+        setUpTestDriver(new ReadOnlyProps(props.entrySet().iterator()));
+    }
 
     @Test
     public void testStartKeyStopKey() throws SQLException {
@@ -94,6 +131,110 @@ public class CreateTableIT extends ParallelStatsDisabledIT {
         PhoenixStatement pstatement = statement.unwrap(PhoenixStatement.class);
         List<KeyRange> splits = pstatement.getQueryPlan().getSplits();
         assertTrue(splits.size() > 0);
+    }
+
+    @Test
+    public void testSplitsWithFile() throws Exception {
+        File splitFile = new File("splitFile.txt");
+        try {
+            try (BufferedWriter writer = new BufferedWriter(new FileWriter(splitFile))) {
+                writer.write("EA");
+                writer.newLine();
+                writer.write("EZ");
+            }
+            Properties props = new Properties();
+            Connection conn = DriverManager.getConnection(getUrl(), props);
+            String tableName = generateUniqueName();
+            conn.createStatement().execute("CREATE TABLE " + tableName
+                    + " (pk char(2) not null primary key) SPLITS_FILE='splitFile.txt'");
+            conn.close();
+            String query = "select * from  " + tableName;
+            conn = DriverManager.getConnection(getUrl(), props);
+            Statement statement = conn.createStatement();
+            statement.execute(query);
+            PhoenixStatement pstatement = statement.unwrap(PhoenixStatement.class);
+            List<KeyRange> splits = pstatement.getQueryPlan().getSplits();
+            // There will be 3 region splits: '' - EA, EA - EZ, EZ - ''
+            assertEquals(3, splits.size());
+        } finally {
+            // Delete split file.
+            splitFile.delete();
+        }
+    }
+
+    /**
+     * Pass the absolute path of the splits file while creating the table.
+     * @throws Exception
+     */
+    @Test
+    public void testSplitsWithAbsoluteFileName() throws Exception {
+        File splitFile = new File("splitFile.txt");
+        try {
+            try (BufferedWriter writer = new BufferedWriter(new FileWriter(splitFile))) {
+                writer.write("EA");
+                writer.newLine();
+                writer.write("EZ");
+            }
+            Properties props = new Properties();
+            Connection conn = DriverManager.getConnection(getUrl(), props);
+            String tableName = generateUniqueName();
+            String createTableSql = "CREATE TABLE " + tableName
+                    + " (pk char(2) not null primary key) SPLITS_FILE='" + splitFile.getAbsolutePath() + "'";
+            conn.createStatement().execute(createTableSql);
+            conn.close();
+            String query = "select * from  " + tableName;
+            conn = DriverManager.getConnection(getUrl(), props);
+            Statement statement = conn.createStatement();
+            statement.execute(query);
+            PhoenixStatement pstatement = statement.unwrap(PhoenixStatement.class);
+            List<KeyRange> splits = pstatement.getQueryPlan().getSplits();
+            // There will be 3 region splits: '' - EA, EA - EZ, EZ - ''
+            assertEquals(3, splits.size());
+        } finally {
+            // Delete split file.
+            splitFile.delete();
+        }
+    }
+
+    /**
+     * Test create table fails with an invalid file name.
+     * @throws Exception
+     */
+    @Test
+    public void testSplitsWithBadFileName() throws Exception {
+        Properties props = new Properties();
+        Connection conn = DriverManager.getConnection(getUrl(), props);
+        String tableName = generateUniqueName();
+        try {
+            conn.createStatement().execute("CREATE TABLE " + tableName
+                    + " (pk char(2) not null primary key) SPLITS_FILE='bad-split-file.txt'");
+            Assert.fail("Shouldn't come here");
+        } catch (SQLException e) {
+            assertEquals(SQLExceptionCode.SPLIT_FILE_DONT_EXIST.getErrorCode(), e.getErrorCode());
+        } finally {
+            conn.close();
+        }
+    }
+
+    /**
+     * Test create table fails when both split file and split points are provided.
+     * @throws Exception
+     */
+    @Test
+    public void testSplitsWithBothSplitPointsAndSplitFileProvided() throws Exception {
+        Properties props = new Properties();
+        Connection conn = DriverManager.getConnection(getUrl(), props);
+        String tableName = generateUniqueName();
+        try {
+            conn.createStatement().execute("CREATE TABLE " + tableName
+                    + " (pk char(2) not null primary key) SPLITS_FILE='bad-split-file.txt'" +
+                    " SPLIT ON ('EA','EZ')" );
+            Assert.fail("Shouldn't come here");
+        } catch (SQLException e) {
+            assertEquals(SQLExceptionCode.SPLITS_AND_SPLIT_FILE_EXISTS.getErrorCode(), e.getErrorCode());
+        } finally {
+            conn.close();
+        }
     }
 
     @Test
@@ -337,6 +478,9 @@ public class CreateTableIT extends ParallelStatsDisabledIT {
                 admin.getDescriptor(TableName.valueOf(tableName)).getColumnFamilies();
         assertEquals(1, columnFamilies.length);
         assertEquals(86400, columnFamilies[0].getTimeToLive());
+        //Check if TTL is stored in SYSCAT as well and we are getting ttl from get api in PTable
+        assertEquals(86400, conn.unwrap(PhoenixConnection.class).getTable(
+                new PTableKey(null, tableName)).getTTL());
     }
 
     @Test
@@ -393,6 +537,9 @@ public class CreateTableIT extends ParallelStatsDisabledIT {
         assertEquals("B", columnFamilies[0].getNameAsString());
         assertEquals(86400, columnFamilies[1].getTimeToLive());
         assertEquals("C", columnFamilies[1].getNameAsString());
+        //Check if TTL is stored in SYSCAT as well and we are getting ttl from get api in PTable
+        assertEquals(86400, conn.unwrap(PhoenixConnection.class).getTable(
+                new PTableKey(null, tableName)).getTTL());
     }
 
     /**
@@ -419,6 +566,9 @@ public class CreateTableIT extends ParallelStatsDisabledIT {
         assertEquals(86400, columnFamilies[0].getTimeToLive());
         assertEquals("B", columnFamilies[1].getNameAsString());
         assertEquals(86400, columnFamilies[1].getTimeToLive());
+        //Check if TTL is stored in SYSCAT as well and we are getting ttl from get api in PTable
+        assertEquals(86400, conn.unwrap(PhoenixConnection.class).getTable(
+                new PTableKey(null, tableName)).getTTL());
     }
 
     /**
@@ -497,6 +647,9 @@ public class CreateTableIT extends ParallelStatsDisabledIT {
         assertEquals(1, columnFamilies.length);
         assertEquals("a", columnFamilies[0].getNameAsString());
         assertEquals(10000, columnFamilies[0].getTimeToLive());
+        //Check if TTL is stored in SYSCAT as well and we are getting ttl from get api in PTable
+        assertEquals(10000, conn.unwrap(PhoenixConnection.class).getTable(
+                new PTableKey(null, tableName)).getTTL());
     }
 
     /**
@@ -519,6 +672,9 @@ public class CreateTableIT extends ParallelStatsDisabledIT {
         assertEquals(1, columnFamilies.length);
         assertEquals("a", columnFamilies[0].getNameAsString());
         assertEquals(10000, columnFamilies[0].getTimeToLive());
+        //Check if TTL is stored in SYSCAT as well and we are getting ttl from get api in PTable
+        assertEquals(10000, conn.unwrap(PhoenixConnection.class).getTable(
+                new PTableKey(null, tableName)).getTTL());
     }
 
     @Test
@@ -768,13 +924,13 @@ public class CreateTableIT extends ParallelStatsDisabledIT {
         String schemaName = generateUniqueName();
         String tableName = generateUniqueName();
         String fullTableName = SchemaUtil.getTableName(schemaName, tableName);
-        try (Connection conn = DriverManager.getConnection(getUrl())) {
+        try (PhoenixConnection conn = (PhoenixConnection) DriverManager.getConnection(getUrl())) {
             String ddl = "CREATE TABLE " + fullTableName +
                 " (id char(1) NOT NULL," + " col1 integer NOT NULL," + " col2 bigint NOT NULL," +
                 " CONSTRAINT NAME_PK PRIMARY KEY (id, col1, col2)) " +
                 "CHANGE_DETECTION_ENABLED=true";
             conn.createStatement().execute(ddl);
-            PTable table = PhoenixRuntime.getTableNoCache(conn, fullTableName);
+            PTable table = conn.getTableNoCache(fullTableName);
             assertTrue(table.isChangeDetectionEnabled());
             AlterTableIT.verifySchemaExport(table, getUtility().getConfiguration());
         }
@@ -892,7 +1048,8 @@ public class CreateTableIT extends ParallelStatsDisabledIT {
         Properties props = PropertiesUtil.deepCopy(TestUtil.TEST_PROPERTIES);
         String createTableString = "CREATE TABLE " + tableName + " (k VARCHAR PRIMARY KEY, "
                 + "v1 VARCHAR, v2 VARCHAR)";
-        verifyUCFValueInSysCat(tableName, createTableString, props, 0L);
+        verifyUCFValueInSysCat(tableName, createTableString, props,
+                QueryServicesOptions.DEFAULT_UPDATE_CACHE_FREQUENCY);
     }
 
     @Test
@@ -1148,7 +1305,7 @@ public class CreateTableIT extends ParallelStatsDisabledIT {
         String fullTableName = SchemaUtil.getTableName(TestUtil.DEFAULT_SCHEMA_NAME, tableName);
         String fullIndexeName = SchemaUtil.getTableName(TestUtil.DEFAULT_SCHEMA_NAME, indexName);
         // Check system tables priorities.
-        try (Admin admin = driver.getConnectionQueryServices(null, null).getAdmin();
+        try (Admin admin = driver.getConnectionQueryServices(getUrl(), new Properties()).getAdmin();
                 Connection c = DriverManager.getConnection(getUrl())) {
             ResultSet rs = c.getMetaData().getTables("", 
                     "\""+ PhoenixDatabaseMetaData.SYSTEM_CATALOG_SCHEMA + "\"", 
@@ -1163,7 +1320,7 @@ public class CreateTableIT extends ParallelStatsDisabledIT {
                 String val = htd.getValue("PRIORITY");
                 assertNotNull("PRIORITY is not set for table:" + htd, val);
                 assertTrue(Integer.parseInt(val)
-                        >= PhoenixRpcSchedulerFactory.getMetadataPriority(config));
+                        >= IndexUtil.getMetadataPriority(config));
             }
             Properties props = PropertiesUtil.deepCopy(TEST_PROPERTIES);
             String ddl ="CREATE TABLE " + fullTableName + TestUtil.TEST_TABLE_SCHEMA;
@@ -1187,7 +1344,7 @@ public class CreateTableIT extends ParallelStatsDisabledIT {
                     org.apache.hadoop.hbase.TableName.valueOf(fullIndexeName));
             val = indexTable.getValue("PRIORITY");
             assertNotNull("PRIORITY is not set for table:" + indexTable, val);
-            assertTrue(Integer.parseInt(val) >= PhoenixRpcSchedulerFactory.getIndexPriority(config));
+            assertTrue(Integer.parseInt(val) >= IndexUtil.getIndexPriority(config));
         }
     }
 
@@ -1217,7 +1374,7 @@ public class CreateTableIT extends ParallelStatsDisabledIT {
             ddl += ", STREAMING_TOPIC_NAME='" + topicName + "'";
         }
         conn.createStatement().execute(ddl);
-        PTable table = PhoenixRuntime.getTableNoCache(conn, dataTableFullName);
+        PTable table = conn.unwrap(PhoenixConnection.class).getTableNoCache(dataTableFullName);
         assertEquals(dataTableVersion, table.getSchemaVersion());
         if (topicName != null) {
             assertEquals(topicName, table.getStreamingTopicName());
@@ -1245,73 +1402,517 @@ public class CreateTableIT extends ParallelStatsDisabledIT {
     }
 
     @Test
-    public void testNormalizerIsDisbledForSalted() throws Exception {
-        String tableName = generateUniqueName();
-        String indexName = generateUniqueName();
-
-        String mtTableName = generateUniqueName();
-        String mtViewName = generateUniqueName();
-        String mtIndexName = generateUniqueName();
-
-        String conflictTableName = generateUniqueName();
-
-        String ddl =
-                "create table  " + tableName + " ( id integer PRIMARY KEY," + " col1 integer,"
-                        + " col2 bigint" + " ) SALT_BUCKETS=4";
-        String indexDdl =
-                "create index IF NOT EXISTS " + indexName + " on " + tableName + " (col2)";
-        String mtDdl =
-                "CREATE TABLE " + mtTableName + " (TenantId UNSIGNED_INT NOT NULL ,"
-                        + " Id UNSIGNED_INT NOT NULL ," + " val VARCHAR, "
-                        + " CONSTRAINT pk PRIMARY KEY(TenantId, Id) "
-                        + " ) MULTI_TENANT=true, SALT_BUCKETS=4";
-        String mtViewDdl =
-                "CREATE VIEW " + mtViewName + "(view_column CHAR(15)) AS " + " SELECT * FROM "
-                        + mtTableName + " WHERE val='L' ";
-        String mtIndexDdl = "CREATE INDEX " + mtIndexName + " on " + mtViewName + " (view_column) ";
-
-        String confictDdl =
-                "create table  " + conflictTableName + " ( id integer PRIMARY KEY,"
-                        + " col1 integer," + " col2 bigint" + " ) SALT_BUCKETS=4, "
-                        + TableDescriptorBuilder.NORMALIZATION_ENABLED + "=true";
-
+    public void testCreateTableWithColumnQualifiers() throws Exception {
         Properties props = new Properties();
         Connection conn = DriverManager.getConnection(getUrl(), props);
+        String tableName = generateUniqueName();
+        String ddl = "CREATE TABLE \"" + tableName + "\"(K VARCHAR NOT NULL PRIMARY KEY, " +
+                "INT INTEGER ENCODED_QUALIFIER 11, INT2 INTEGER ENCODED_QUALIFIER 12, " +
+                "INT3 INTEGER ENCODED_QUALIFIER 14) COLUMN_QUALIFIER_COUNTER ('"
+                + QueryConstants.DEFAULT_COLUMN_FAMILY + "'=15)";
         conn.createStatement().execute(ddl);
-        conn.createStatement().execute(indexDdl);
-        conn.createStatement().execute(mtDdl);
-        conn.createStatement().execute(mtViewDdl);
-        conn.createStatement().execute(mtIndexDdl);
+        PhoenixConnection pconn = conn.unwrap(PhoenixConnection.class);
+        PTable table = pconn.getTable(new PTableKey(null, tableName));
 
-        Admin admin = driver.getConnectionQueryServices(getUrl(), props).getAdmin();
-        assertEquals("false", admin.getDescriptor(TableName.valueOf(tableName))
-                .getValue(TableDescriptorBuilder.NORMALIZATION_ENABLED));
-        assertEquals("false", admin.getDescriptor(TableName.valueOf(indexName))
-                .getValue(TableDescriptorBuilder.NORMALIZATION_ENABLED));
-        assertEquals("false", admin.getDescriptor(TableName.valueOf(mtTableName))
-                .getValue(TableDescriptorBuilder.NORMALIZATION_ENABLED));
-        assertEquals("false", admin.getDescriptor(TableName.valueOf("_IDX_" + mtTableName))
-                .getValue(TableDescriptorBuilder.NORMALIZATION_ENABLED));
+        QualifierEncodingScheme encodingScheme = table.getEncodingScheme();
+        assertNotEquals(PTable.QualifierEncodingScheme.NON_ENCODED_QUALIFIERS, encodingScheme);
 
+        PTable.EncodedCQCounter cqCounter = table.getEncodedCQCounter();
+        assertEquals(15, cqCounter.values().get(QueryConstants.DEFAULT_COLUMN_FAMILY).intValue());
+        assertEquals(11, encodingScheme.decode(table.getColumnForColumnName("INT")
+                .getColumnQualifierBytes()));
+        assertEquals(12, encodingScheme.decode(table.getColumnForColumnName("INT2")
+                .getColumnQualifierBytes()));
+        assertEquals(14, encodingScheme.decode(table.getColumnForColumnName("INT3")
+                .getColumnQualifierBytes()));
+        assertNull(table.getMaxLookbackAge());
+    }
+
+    @Test
+    public void testCreateTableWithNotOrderedColumnQualifiers() throws Exception {
+        Properties props = new Properties();
+        Connection conn = DriverManager.getConnection(getUrl(), props);
+        String tableName = generateUniqueName();
+        String ddl = "CREATE TABLE \"" + tableName + "\"(K VARCHAR NOT NULL PRIMARY KEY, " +
+                "INT3 INTEGER ENCODED_QUALIFIER 14, INT INTEGER ENCODED_QUALIFIER 11, " +
+                "INT2 INTEGER ENCODED_QUALIFIER 12) COLUMN_QUALIFIER_COUNTER ('"
+                + QueryConstants.DEFAULT_COLUMN_FAMILY + "'=15)";
+        conn.createStatement().execute(ddl);
+        PhoenixConnection pconn = conn.unwrap(PhoenixConnection.class);
+        PTable table = pconn.getTable(new PTableKey(null, tableName));
+
+        QualifierEncodingScheme encodingScheme = table.getEncodingScheme();
+        assertNotEquals(PTable.QualifierEncodingScheme.NON_ENCODED_QUALIFIERS, encodingScheme);
+
+        PTable.EncodedCQCounter cqCounter = table.getEncodedCQCounter();
+        assertEquals(15, cqCounter.values().get(QueryConstants.DEFAULT_COLUMN_FAMILY).intValue());
+        assertEquals(11, encodingScheme.decode(table.getColumnForColumnName("INT")
+                .getColumnQualifierBytes()));
+        assertEquals(12, encodingScheme.decode(table.getColumnForColumnName("INT2")
+                .getColumnQualifierBytes()));
+        assertEquals(14, encodingScheme.decode(table.getColumnForColumnName("INT3")
+                .getColumnQualifierBytes()));
+    }
+
+    @Test
+    public void testCreateTableWithColumnQualifiersWithoutCounter() throws Exception {
+        Properties props = new Properties();
+        Connection conn = DriverManager.getConnection(getUrl(), props);
+        String tableName = generateUniqueName();
+        String ddl = "CREATE TABLE \"" + tableName + "\"(K VARCHAR NOT NULL PRIMARY KEY, " +
+                "INT INTEGER ENCODED_QUALIFIER 11, INT2 INTEGER ENCODED_QUALIFIER 12, " +
+                "INT3 INTEGER ENCODED_QUALIFIER 14)";
+        conn.createStatement().execute(ddl);
+        PhoenixConnection pconn = conn.unwrap(PhoenixConnection.class);
+        PTable table = pconn.getTable(new PTableKey(null, tableName));
+
+        QualifierEncodingScheme encodingScheme = table.getEncodingScheme();
+        assertNotEquals(PTable.QualifierEncodingScheme.NON_ENCODED_QUALIFIERS, encodingScheme);
+
+        PTable.EncodedCQCounter cqCounter = table.getEncodedCQCounter();
+        assertEquals(15, cqCounter.values().get(QueryConstants.DEFAULT_COLUMN_FAMILY).intValue());
+        assertEquals(11, encodingScheme.decode(table.getColumnForColumnName("INT")
+                .getColumnQualifierBytes()));
+        assertEquals(12, encodingScheme.decode(table.getColumnForColumnName("INT2")
+                .getColumnQualifierBytes()));
+        assertEquals(14, encodingScheme.decode(table.getColumnForColumnName("INT3")
+                .getColumnQualifierBytes()));
+    }
+
+    @Test
+    public void testCreateTableWithColumnQualifiersMultipleFamilies() throws Exception {
+        Properties props = new Properties();
+        Connection conn = DriverManager.getConnection(getUrl(), props);
+        String tableName = generateUniqueName();
+        String ddl = "CREATE IMMUTABLE TABLE \"" + tableName + "\"(K VARCHAR NOT NULL PRIMARY KEY, " +
+                "A.INT INTEGER ENCODED_QUALIFIER 11, A.INT2 INTEGER ENCODED_QUALIFIER 13, " +
+                "B.INT3 INTEGER ENCODED_QUALIFIER 12) " +
+                "COLUMN_QUALIFIER_COUNTER ('A'=14, 'B'=13)";
+        conn.createStatement().execute(ddl);
+        PhoenixConnection pconn = conn.unwrap(PhoenixConnection.class);
+        PTable table = pconn.getTable(new PTableKey(null, tableName));
+
+        QualifierEncodingScheme encodingScheme = table.getEncodingScheme();
+        assertNotEquals(PTable.QualifierEncodingScheme.NON_ENCODED_QUALIFIERS, encodingScheme);
+
+        PTable.EncodedCQCounter cqCounter = table.getEncodedCQCounter();
+        assertEquals(14, cqCounter.values().get("A").intValue());
+        assertEquals(13, cqCounter.values().get("B").intValue());
+        assertEquals(11, encodingScheme.decode(table.getColumnForColumnName("INT")
+                .getColumnQualifierBytes()));
+        assertEquals(13, encodingScheme.decode(table.getColumnForColumnName("INT2")
+                .getColumnQualifierBytes()));
+        assertEquals(12, encodingScheme.decode(table.getColumnForColumnName("INT3")
+                .getColumnQualifierBytes()));
+    }
+
+    @Test
+    public void testCreateTableWithColumnQualifiersMultipleFamiliesWithoutCounter() throws Exception {
+        Properties props = new Properties();
+        Connection conn = DriverManager.getConnection(getUrl(), props);
+        String tableName = generateUniqueName();
+        String ddl = "CREATE IMMUTABLE TABLE \"" + tableName + "\"(K VARCHAR NOT NULL PRIMARY KEY, " +
+                "A.INT INTEGER ENCODED_QUALIFIER 11, A.INT2 INTEGER ENCODED_QUALIFIER 13, " +
+                "B.INT3 INTEGER ENCODED_QUALIFIER 12)";
+        conn.createStatement().execute(ddl);
+        PhoenixConnection pconn = conn.unwrap(PhoenixConnection.class);
+        PTable table = pconn.getTable(new PTableKey(null, tableName));
+
+        QualifierEncodingScheme encodingScheme = table.getEncodingScheme();
+        assertNotEquals(PTable.QualifierEncodingScheme.NON_ENCODED_QUALIFIERS, encodingScheme);
+
+        PTable.EncodedCQCounter cqCounter = table.getEncodedCQCounter();
+        assertEquals(14, cqCounter.values().get("A").intValue());
+        assertEquals(13, cqCounter.values().get("B").intValue());
+        assertEquals(11, encodingScheme.decode(table.getColumnForColumnName("INT")
+                .getColumnQualifierBytes()));
+        assertEquals(13, encodingScheme.decode(table.getColumnForColumnName("INT2")
+                .getColumnQualifierBytes()));
+        assertEquals(12, encodingScheme.decode(table.getColumnForColumnName("INT3")
+                .getColumnQualifierBytes()));
+    }
+
+    @Test
+    public void testCreateTableWithColumnQualifiersDuplicateCQ() throws Exception {
+        Properties props = new Properties();
+        Connection conn = DriverManager.getConnection(getUrl(), props);
+        String tableName = generateUniqueName();
+        String ddl = "CREATE TABLE \"" + tableName + "\"(K VARCHAR NOT NULL PRIMARY KEY, " +
+                "INT INTEGER ENCODED_QUALIFIER 11, INT2 INTEGER ENCODED_QUALIFIER 11, " +
+                "INT3 INTEGER ENCODED_QUALIFIER 14) COLUMN_QUALIFIER_COUNTER ('0'=15)";
         try {
-            conn.createStatement().execute(confictDdl);
-            fail("Should have thrown an exception");
-        } catch (Exception e) {
-            assertTrue(e instanceof SQLException);
+            conn.createStatement().execute(ddl);
+            fail("Duplicate Column Qualifiers");
+        } catch (SQLException e) {
+            // expected DUPLICATE_CQ
+            if (e.getErrorCode() != SQLExceptionCode.DUPLICATE_CQ.getErrorCode()) {
+                fail("Duplicate Column Qualifiers");
+            }
         }
     }
 
-    public static long verifyLastDDLTimestamp(String dataTableFullName, long startTS, Connection conn) throws SQLException {
+    @Test
+    public void testCreateTableInvalidColumnQualifier() throws Exception {
+        Properties props = new Properties();
+        Connection conn = DriverManager.getConnection(getUrl(), props);
+        String tableName = generateUniqueName();
+        String ddl = "CREATE TABLE \"" + tableName + "\"(K VARCHAR NOT NULL PRIMARY KEY, " +
+                "INT INTEGER ENCODED_QUALIFIER 11, INT2 INTEGER ENCODED_QUALIFIER 9, " +
+                "INT3 INTEGER ENCODED_QUALIFIER 14) COLUMN_QUALIFIER_COUNTER ('0'=15)";
+        try {
+            conn.createStatement().execute(ddl);
+            fail("Invalid Column Qualifier");
+        } catch (SQLException e) {
+            // expected INVALID_CQ
+            if (e.getErrorCode() != SQLExceptionCode.INVALID_CQ.getErrorCode()) {
+                fail("Invalid Column Qualifier");
+            }
+        }
+
+        ddl = "CREATE TABLE \"" + tableName + "\"(K VARCHAR NOT NULL PRIMARY KEY, " +
+                "INT INTEGER ENCODED_QUALIFIER 11) COLUMN_QUALIFIER_COUNTER ('0'=8)";
+        try {
+            conn.createStatement().execute(ddl);
+            fail("Invalid Column Qualifier");
+        } catch (SQLException e) {
+            // expected INVALID_CQ
+            if (e.getErrorCode() != SQLExceptionCode.INVALID_CQ.getErrorCode()) {
+                fail("Invalid Column Qualifier");
+            }
+        }
+
+        ddl = "CREATE TABLE \"" + tableName + "\"(K VARCHAR NOT NULL PRIMARY KEY, " +
+                "INT INTEGER ENCODED_QUALIFIER 15) COLUMN_QUALIFIER_COUNTER ('0'=13)";
+        try {
+            conn.createStatement().execute(ddl);
+            fail("Invalid Column Qualifier");
+        } catch (SQLException e) {
+            // expected INVALID_CQ
+            if (e.getErrorCode() != SQLExceptionCode.INVALID_CQ.getErrorCode()) {
+                fail("Invalid Column Qualifier");
+            }
+        }
+
+        ddl = "CREATE IMMUTABLE TABLE \"" + tableName + "\"(K VARCHAR NOT NULL PRIMARY KEY, " +
+                "INT1 INTEGER, " +
+                "INT2 INTEGER " +
+                "DEFAULT_COLUMN_FAMILY=dF" +
+                "COLUMN_QUALIFIER_COUNTER (\"0\"=13)";
+        try {
+            conn.createStatement().execute(ddl);
+        } catch (SQLException e) {
+            //expected
+        }
+    }
+
+    @Test
+    public void testCreateTableMissingColumnQualifier() throws Exception {
+        Properties props = new Properties();
+        Connection conn = DriverManager.getConnection(getUrl(), props);
+        String tableName = generateUniqueName();
+        String ddl = "CREATE TABLE \"" + tableName + "\"(K VARCHAR NOT NULL PRIMARY KEY, " +
+                "INT INTEGER, INT2 INTEGER ENCODED_QUALIFIER 12)";
+        try {
+            conn.createStatement().execute(ddl);
+            fail("Invalid Column Qualifier");
+        } catch (SQLException e) {
+            // expected MISSING_CQ
+            if (e.getErrorCode() != SQLExceptionCode.MISSING_CQ.getErrorCode()) {
+                fail("Missing Column Qualifier");
+            }
+        }
+
+        ddl = "CREATE TABLE \"" + tableName + "\"(K VARCHAR NOT NULL PRIMARY KEY, " +
+                "INT INTEGER ENCODED_QUALIFIER 11, INT2 INTEGER) COLUMN_QUALIFIER_COUNTER ('0'=13)";
+        try {
+            conn.createStatement().execute(ddl);
+            fail("Invalid Column Qualifier");
+        } catch (SQLException e) {
+            // expected MISSING_CQ
+            if (e.getErrorCode() != SQLExceptionCode.MISSING_CQ.getErrorCode()) {
+                fail("Missing Column Qualifier");
+            }
+        }
+    }
+
+    @Test
+    public void testCreateTableDefaultColumnQualifier() throws Exception {
+        Properties props = new Properties();
+        Connection conn = DriverManager.getConnection(getUrl(), props);
+        String tableName = generateUniqueName();
+        String ddl = "CREATE IMMUTABLE TABLE \"" + tableName + "\"(K VARCHAR NOT NULL PRIMARY KEY, " +
+                "INT1 INTEGER, " +
+                "INT2 INTEGER, " +
+                "a.INT3 INTEGER, " +
+                "\"A\".INT4 INTEGER, " +
+                "\"b\".INT5 INTEGER, " +
+                "\"B\".INT6 INTEGER) " +
+                "DEFAULT_COLUMN_FAMILY=dF";
+        conn.createStatement().execute(ddl);
+        PhoenixConnection pconn = conn.unwrap(PhoenixConnection.class);
+        PTable table = pconn.getTable(new PTableKey(null, tableName));
+
+        QualifierEncodingScheme encodingScheme = table.getEncodingScheme();
+        assertNotEquals(PTable.QualifierEncodingScheme.NON_ENCODED_QUALIFIERS, encodingScheme);
+
+        PTable.EncodedCQCounter cqCounter = table.getEncodedCQCounter();
+        assertEquals(13, cqCounter.values().get("dF").intValue());
+        assertEquals(13, cqCounter.values().get("A").intValue());
+        assertEquals(12, cqCounter.values().get("b").intValue());
+        assertEquals(12, cqCounter.values().get("B").intValue());
+        assertEquals(11, encodingScheme.decode(table.getColumnForColumnName("INT1")
+                .getColumnQualifierBytes()));
+        assertEquals(12, encodingScheme.decode(table.getColumnForColumnName("INT2")
+                .getColumnQualifierBytes()));
+        assertEquals(11, encodingScheme.decode(table.getColumnForColumnName("INT3")
+                .getColumnQualifierBytes()));
+        assertEquals(12, encodingScheme.decode(table.getColumnForColumnName("INT4")
+                .getColumnQualifierBytes()));
+        assertEquals(11, encodingScheme.decode(table.getColumnForColumnName("INT5")
+                .getColumnQualifierBytes()));
+        assertEquals(11, encodingScheme.decode(table.getColumnForColumnName("INT6")
+                .getColumnQualifierBytes()));
+    }
+
+    // Test for PHOENIX-6953
+    @Test
+    public void testCoprocessorsForCreateIndexOnOldImplementation() throws Exception {
+        String tableName = generateUniqueName();
+        String index1Name = generateUniqueName();
+        String index2Name = generateUniqueName();
+
+        String ddl =
+                "create table  " + tableName + " ( k integer PRIMARY KEY," + " v1 integer,"
+                        + " v2 integer)";
+        String index1Ddl = "create index  " + index1Name + " on " + tableName + " (v1)";
+        String index2Ddl = "create index  " + index2Name + " on " + tableName + " (v2)";
+
+        Properties props = new Properties();
+        Admin admin = driver.getConnectionQueryServices(getUrl(), props).getAdmin();
+
+        try (Connection conn = DriverManager.getConnection(getUrl());
+                Statement stmt = conn.createStatement();) {
+            stmt.execute(ddl);
+            stmt.execute(index1Ddl);
+
+            TableDescriptor index1DescriptorBefore =
+                    admin.getDescriptor(TableName.valueOf(index1Name));
+            assertTrue(index1DescriptorBefore
+                    .hasCoprocessor(org.apache.phoenix.index.GlobalIndexChecker.class.getName()));
+
+            // Now roll back to the old indexing
+            IndexUpgradeTool iut =
+                    new IndexUpgradeTool(ROLLBACK_OP, tableName, null,
+                        File.createTempFile("index_upgrade_", null).toString(), false, null,
+                            false);
+            iut.setConf(getUtility().getConfiguration());
+            iut.prepareToolSetup();
+            assertEquals(0, iut.executeTool());
+
+            TableDescriptor index1DescriptorAfter =
+                    admin.getDescriptor(TableName.valueOf(index1Name));
+            assertFalse(index1DescriptorAfter
+                    .hasCoprocessor(org.apache.phoenix.index.GlobalIndexChecker.class.getName()));
+
+            // New index must not have GlobalIndexChecker
+            stmt.execute(index2Ddl);
+            TableDescriptor index2Descriptor = admin.getDescriptor(TableName.valueOf(index2Name));
+            assertFalse(index2Descriptor
+                    .hasCoprocessor(org.apache.phoenix.index.GlobalIndexChecker.class.getName()));
+        }
+    }
+
+    // Test for PHOENIX-6953
+    @Test
+    public void testCoprocessorsForTransactionalCreateIndexOnOldImplementation() throws Exception {
+        String tableName = generateUniqueName();
+        String index1Name = generateUniqueName();
+
+        String ddl =
+                "create table  " + tableName + " ( k integer PRIMARY KEY," + " v1 integer,"
+                        + " v2 integer) TRANSACTIONAL=TRUE";
+        String index1Ddl = "create index  " + index1Name + " on " + tableName + " (v1)";
+
+        Properties props = new Properties();
+        Admin admin = driver.getConnectionQueryServices(getUrl(), props).getAdmin();
+
+        try (Connection conn = DriverManager.getConnection(getUrl());
+                Statement stmt = conn.createStatement();) {
+            stmt.execute(ddl);
+            stmt.execute(index1Ddl);
+
+            // Transactional indexes don't have GlobalIndexChecker
+            TableDescriptor index1DescriptorBefore =
+                    admin.getDescriptor(TableName.valueOf(index1Name));
+            assertFalse(index1DescriptorBefore
+                    .hasCoprocessor(org.apache.phoenix.index.GlobalIndexChecker.class.getName()));
+
+            // Now roll back to the old indexing
+            IndexUpgradeTool iut =
+                    new IndexUpgradeTool(ROLLBACK_OP, tableName, null,
+                        File.createTempFile("index_upgrade_", null).toString(), false, null,
+                            false);
+            iut.setConf(getUtility().getConfiguration());
+            iut.prepareToolSetup();
+            assertEquals(0, iut.executeTool());
+
+            // Make sure we don't add GlobalIndexChecker
+            TableDescriptor index1DescriptorAfter =
+                    admin.getDescriptor(TableName.valueOf(index1Name));
+            assertFalse(index1DescriptorAfter
+                    .hasCoprocessor(org.apache.phoenix.index.GlobalIndexChecker.class.getName()));
+
+            // We should also test for setting / unsetting the transactional status, but both are
+            // forbidden at the time of writing.
+        }
+    }
+
+    @Test
+    public void testCreateTableWithNoVerify() throws SQLException, IOException, InterruptedException {
+        final String tableName = SchemaUtil.getTableName(generateUniqueName(), generateUniqueName());
+        final byte[] tableBytes = tableName.getBytes();
+        final byte[] familyName = Bytes.toBytes(SchemaUtil.normalizeIdentifier("0"));
+        final byte[][] splits = new byte[][] {Bytes.toBytes(20), Bytes.toBytes(30)};
+
+        try (Admin admin = driver.getConnectionQueryServices(getUrl(), PropertiesUtil.deepCopy(TEST_PROPERTIES)).getAdmin()) {
+            admin.createTable(TableDescriptorBuilder.newBuilder(TableName.valueOf(tableBytes))
+                    .addColumnFamily(ColumnFamilyDescriptorBuilder.newBuilder(familyName)
+                            .setKeepDeletedCells(KeepDeletedCells.TRUE).build())
+                    .build(), splits);
+        }
+
+        final byte[] uintCol = Bytes.toBytes("UINT_COL");
+        final byte[] ulongCol = Bytes.toBytes("ULONG_COL");
+        final byte[] key_1 = ByteUtil.concat(Bytes.toBytes(20), Bytes.toBytes(200L), Bytes.toBytes("b"));
+        final byte[] key_2 = ByteUtil.concat(Bytes.toBytes(40), Bytes.toBytes(400L), Bytes.toBytes("d"));
+        final byte[] emptyColumnQualifier = Bytes.toBytes("_0");
+
+        ConnectionQueryServices services = driver.getConnectionQueryServices(getUrl(), PropertiesUtil.deepCopy(TEST_PROPERTIES));
+        try (Table hTable = services.getTable(tableBytes)) {
+            // Insert rows using standard HBase mechanism with standard HBase "types"
+            List<Row> mutations = new ArrayList<>();
+
+            Put put = new Put(key_1);
+            put.addColumn(familyName, uintCol, HConstants.LATEST_TIMESTAMP, Bytes.toBytes(5000));
+            put.addColumn(familyName, ulongCol, HConstants.LATEST_TIMESTAMP, Bytes.toBytes(50000L));
+            mutations.add(put);
+
+            put = new Put(key_2);
+            put.addColumn(familyName, uintCol, HConstants.LATEST_TIMESTAMP, Bytes.toBytes(4000));
+            put.addColumn(familyName, ulongCol, HConstants.LATEST_TIMESTAMP, Bytes.toBytes(40000L));
+            mutations.add(put);
+
+            hTable.batch(mutations, null);
+
+            Result result = hTable.get(new Get(key_1));
+            assertFalse(result.isEmpty());
+
+            result = hTable.get(new Get(key_2));
+            assertFalse(result.isEmpty());
+        }
+
+        String ddl = "create table " + tableName +
+                "   (uint_key unsigned_int not null," +
+                "    ulong_key unsigned_long not null," +
+                "    string_key varchar not null,\n" +
+                "    uint_col unsigned_int," +
+                "    ulong_col unsigned_long" +
+                "    CONSTRAINT pk PRIMARY KEY (uint_key, ulong_key, string_key)) noverify COLUMN_ENCODED_BYTES=NONE";
+
+        try (Connection conn = DriverManager.getConnection(url)) {
+            conn.createStatement().execute(ddl);
+        }
+
+        try (Table hTable = services.getTable(tableBytes)) {
+            Result result = hTable.get(new Get(key_1));
+
+            byte[] value = result.getValue(familyName, uintCol);
+            assertEquals(5000, Bytes.toInt(value));
+            value = result.getValue(familyName, ulongCol);
+            assertEquals(50000L, Bytes.toLong(value));
+
+            value = result.getValue(familyName, emptyColumnQualifier);
+            assertNull(value);
+
+            result = hTable.get(new Get(key_2));
+            value = result.getValue(familyName, uintCol);
+            assertEquals(4000, Bytes.toInt(value));
+            value = result.getValue(familyName, ulongCol);
+            assertEquals(40000L, Bytes.toLong(value));
+
+            value = result.getValue(familyName, emptyColumnQualifier);
+            assertNull(value);
+        }
+    }
+
+    @Test
+    public void testCreateTableWithTableLevelMaxLookbackAge() throws Exception {
+        String schemaName = generateUniqueName();
+        String dataTableName = generateUniqueName();
+        String fullTableName = SchemaUtil.getTableName(schemaName, dataTableName);
+        Long maxLookbackAge = 259200L;
+        createTableWithTableLevelMaxLookbackAge(fullTableName, maxLookbackAge.toString());
+        assertEquals(maxLookbackAge, queryTableLevelMaxLookbackAge(fullTableName));
+        schemaName = generateUniqueName();
+        dataTableName = generateUniqueName();
+        fullTableName = SchemaUtil.getTableName(schemaName, dataTableName);
+        maxLookbackAge = 25920000000L;
+        createTableWithTableLevelMaxLookbackAge(fullTableName, maxLookbackAge.toString());
+        assertEquals(maxLookbackAge, queryTableLevelMaxLookbackAge(fullTableName));
+        String indexTableName = generateUniqueName();
+        createIndexOnTableWithMaxLookbackAge(indexTableName, fullTableName);
+        assertEquals(maxLookbackAge, queryTableLevelMaxLookbackAge(SchemaUtil.getTableName(schemaName, indexTableName)));
+    }
+
+    @Test
+    public void testCreateTableWithTableLevelMaxLookbackAgeAsNull() throws Exception {
+        String schemaName = generateUniqueName();
+        String dataTableName = generateUniqueName();
+        String fullTableName = SchemaUtil.getTableName(schemaName, dataTableName);
+        createTableWithTableLevelMaxLookbackAge(fullTableName, "NULL");
+        assertNull(queryTableLevelMaxLookbackAge(fullTableName));
+        String indexTableName = generateUniqueName();
+        createIndexOnTableWithMaxLookbackAge(indexTableName, fullTableName);
+        assertNull(queryTableLevelMaxLookbackAge(SchemaUtil.getTableName(schemaName, indexTableName)));
+    }
+
+    @Test
+    public void testCreateTableWithInvalidTableLevelMaxLookbackAge() {
+        String errMsg = "Table level MAX_LOOKBACK_AGE should be a BIGINT value in milli-seconds";
+        IllegalArgumentException err = assertThrows(IllegalArgumentException.class,
+                () -> createTableWithTableLevelMaxLookbackAge(
+                        SchemaUtil.getTableName(generateUniqueName(), generateUniqueName()), "2.3"));
+        assertEquals(errMsg, err.getMessage());
+        err = assertThrows(IllegalArgumentException.class, () -> createTableWithTableLevelMaxLookbackAge(
+                SchemaUtil.getTableName(generateUniqueName(), generateUniqueName()), "three"));
+        assertEquals(errMsg, err.getMessage());
+    }
+
+    @Test
+    public void testCreateIndexWithTableLevelMaxLookbackAge() throws Exception {
+        String schemaName = generateUniqueName();
+        String dataTableName = generateUniqueName();
+        String fullTableName = SchemaUtil.getTableName(schemaName, dataTableName);
+        String indexTableName = generateUniqueName();
+        createTableWithTableLevelMaxLookbackAge(fullTableName, "NULL");
+        String indexOptions = "MAX_LOOKBACK_AGE=300";
+        SQLException err = assertThrows(SQLException.class,
+                () -> createIndexOnTableWithMaxLookbackAge(indexTableName, fullTableName, indexOptions));
+        assertEquals(MAX_LOOKBACK_AGE_SUPPORTED_FOR_TABLES_ONLY.getErrorCode(), err.getErrorCode());
+    }
+
+    public static long verifyLastDDLTimestamp(String tableFullName, long startTS, Connection conn) throws SQLException {
         long endTS = EnvironmentEdgeManager.currentTimeMillis();
         //Now try the PTable API
-        long ddlTimestamp = getLastDDLTimestamp(conn, dataTableFullName);
-        assertTrue("PTable DDL Timestamp not in the right range!",
-            ddlTimestamp >= startTS && ddlTimestamp <= endTS);
+        long ddlTimestamp = getLastDDLTimestamp(conn, tableFullName);
+        assertTrue("PTable DDL Timestamp: " + ddlTimestamp
+                        + " not in the expected range: (" + startTS + ", " + endTS + ")",
+                ddlTimestamp >= startTS && ddlTimestamp <= endTS);
         return ddlTimestamp;
     }
 
-    public static long getLastDDLTimestamp(Connection conn, String dataTableFullName) throws SQLException {
-        PTable table = PhoenixRuntime.getTableNoCache(conn, dataTableFullName);
+    public static long getLastDDLTimestamp(Connection conn, String tableFullName) throws SQLException {
+        PTable table = conn.unwrap(PhoenixConnection.class).getTableNoCache(tableFullName);
         assertNotNull("PTable is null!", table);
         assertNotNull("DDL timestamp is null!", table.getLastDDLTimestamp());
         return table.getLastDDLTimestamp();
@@ -1329,4 +1930,23 @@ public class CreateTableIT extends ParallelStatsDisabledIT {
         }
     }
 
+    private void createTableWithTableLevelMaxLookbackAge(String fullTableName, String maxLookbackAge) throws Exception {
+        try(Connection conn = DriverManager.getConnection(getUrl())) {
+            String createDdl = "CREATE TABLE " + fullTableName +
+                    " (id char(1) NOT NULL PRIMARY KEY,  col1 integer) MAX_LOOKBACK_AGE="+maxLookbackAge;
+            conn.createStatement().execute(createDdl);
+        }
+    }
+
+    private void createIndexOnTableWithMaxLookbackAge(String indexTableName, String fullTableName, String indexOptions) throws Exception {
+        try(Connection conn = DriverManager.getConnection(getUrl())) {
+            String createIndexDdl = "CREATE INDEX " + indexTableName + " ON " + fullTableName + " (COL1) " +
+                    (indexOptions == null ? "" : indexOptions);
+            conn.createStatement().execute(createIndexDdl);
+        }
+    }
+
+    private void createIndexOnTableWithMaxLookbackAge(String indexTableName, String fullTableName) throws Exception {
+        createIndexOnTableWithMaxLookbackAge(indexTableName, fullTableName, null);
+    }
 }

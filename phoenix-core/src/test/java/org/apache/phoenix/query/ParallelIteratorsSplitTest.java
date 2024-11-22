@@ -112,7 +112,10 @@ public class ParallelIteratorsSplitTest extends BaseConnectionlessQueryTest {
         
         PTable table = pconn.getTable(new PTableKey(pconn.getTenantId(), TABLE_NAME));
         TableRef tableRef = new TableRef(table);
-        List<HRegionLocation> regions = pconn.getQueryServices().getAllTableRegions(tableRef.getTable().getPhysicalName().getBytes());
+        List<HRegionLocation> regions =
+                pconn.getQueryServices()
+                        .getAllTableRegions(tableRef.getTable().getPhysicalName().getBytes(),
+                                60000);
         List<KeyRange> ranges = getSplits(tableRef, scan, regions, scanRanges);
         assertEquals("Unexpected number of splits: " + ranges.size(), expectedSplits.size(), ranges.size());
         for (int i=0; i<expectedSplits.size(); i++) {
@@ -121,19 +124,19 @@ public class ParallelIteratorsSplitTest extends BaseConnectionlessQueryTest {
     }
 
     private static KeyRange getKeyRange(byte[] lowerRange, boolean lowerInclusive, byte[] upperRange, boolean upperInclusive) {
-        return PChar.INSTANCE.getKeyRange(lowerRange, lowerInclusive, upperRange, upperInclusive);
+        return PChar.INSTANCE.getKeyRange(lowerRange, lowerInclusive, upperRange, upperInclusive, SortOrder.ASC);
     }
 
     private static KeyRange getKeyRange(String lowerRange, boolean lowerInclusive, String upperRange, boolean upperInclusive) {
-        return PChar.INSTANCE.getKeyRange(Bytes.toBytes(lowerRange), lowerInclusive, Bytes.toBytes(upperRange), upperInclusive);
+        return PChar.INSTANCE.getKeyRange(Bytes.toBytes(lowerRange), lowerInclusive, Bytes.toBytes(upperRange), upperInclusive, SortOrder.ASC);
     }
     
     private static KeyRange getKeyRange(String lowerRange, boolean lowerInclusive, byte[] upperRange, boolean upperInclusive) {
-        return PChar.INSTANCE.getKeyRange(Bytes.toBytes(lowerRange), lowerInclusive, upperRange, upperInclusive);
+        return PChar.INSTANCE.getKeyRange(Bytes.toBytes(lowerRange), lowerInclusive, upperRange, upperInclusive, SortOrder.ASC);
     }
     
     private static KeyRange getKeyRange(byte[] lowerRange, boolean lowerInclusive, String upperRange, boolean upperInclusive) {
-        return PChar.INSTANCE.getKeyRange(lowerRange, lowerInclusive, Bytes.toBytes(upperRange), upperInclusive);
+        return PChar.INSTANCE.getKeyRange(lowerRange, lowerInclusive, Bytes.toBytes(upperRange), upperInclusive, SortOrder.ASC);
     }
     
     private static String nextKey(String s) {
@@ -288,8 +291,8 @@ public class ParallelIteratorsSplitTest extends BaseConnectionlessQueryTest {
     }
     
     private static Collection<?> foreach(ScanRanges scanRanges, int[] widths, KeyRange[] expectedSplits) {
-         SkipScanFilter filter = new SkipScanFilter(scanRanges.getRanges(), buildSchema(widths));
-        Scan scan = new Scan().setFilter(filter).setStartRow(KeyRange.UNBOUND).setStopRow(KeyRange.UNBOUND);
+         SkipScanFilter filter = new SkipScanFilter(scanRanges.getRanges(), buildSchema(widths), false);
+        Scan scan = new Scan().setFilter(filter).withStartRow(KeyRange.UNBOUND).withStopRow(KeyRange.UNBOUND, true);
         List<Object> ret = Lists.newArrayList();
         ret.add(new Object[] {scan, scanRanges, Arrays.<KeyRange>asList(expectedSplits)});
         return ret;
@@ -298,7 +301,7 @@ public class ParallelIteratorsSplitTest extends BaseConnectionlessQueryTest {
     private static Collection<?> foreach(KeyRange[][] ranges, int[] widths, KeyRange[] expectedSplits) {
         RowKeySchema schema = buildSchema(widths);
         List<List<KeyRange>> slots = Lists.transform(Lists.newArrayList(ranges), ARRAY_TO_LIST);
-        SkipScanFilter filter = new SkipScanFilter(slots, schema);
+        SkipScanFilter filter = new SkipScanFilter(slots, schema, false);
         // Always set start and stop key to max to verify we are using the information in skipscan
         // filter over the scan's KMIN and KMAX.
         Scan scan = new Scan().setFilter(filter);

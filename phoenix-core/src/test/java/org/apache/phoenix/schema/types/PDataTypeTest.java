@@ -1745,13 +1745,14 @@ public class PDataTypeTest {
              + "BIGINT ARRAY=[BIGINT ARRAY, BINARY ARRAY, DECIMAL ARRAY, DOUBLE ARRAY, VARBINARY ARRAY], "
              + "BINARY=[BINARY, VARBINARY], "
              + "BINARY ARRAY=[BINARY ARRAY, VARBINARY ARRAY], "
-             + "BOOLEAN=[BINARY, BOOLEAN, VARBINARY], "
+             + "BOOLEAN=[BINARY, BOOLEAN, VARBINARY, VARBINARY_ENCODED], "
              + "BOOLEAN ARRAY=[BINARY ARRAY, BOOLEAN ARRAY, VARBINARY ARRAY], "
+             + "BSON=[BINARY, BSON, VARBINARY], "
              + "CHAR=[BINARY, CHAR, VARBINARY, VARCHAR], "
              + "CHAR ARRAY=[BINARY ARRAY, CHAR ARRAY, VARBINARY ARRAY, VARCHAR ARRAY], "
              + "DATE=[BINARY, DATE, TIME, TIMESTAMP, VARBINARY], "
              + "DATE ARRAY=[BINARY ARRAY, DATE ARRAY, TIME ARRAY, TIMESTAMP ARRAY, VARBINARY ARRAY], "
-             + "DECIMAL=[DECIMAL, VARBINARY], "
+             + "DECIMAL=[DECIMAL, VARBINARY, VARBINARY_ENCODED], "
              + "DECIMAL ARRAY=[DECIMAL ARRAY, VARBINARY ARRAY], "
              + "DOUBLE=[BINARY, DECIMAL, DOUBLE, VARBINARY], "
              + "DOUBLE ARRAY=[BINARY ARRAY, DECIMAL ARRAY, DOUBLE ARRAY, VARBINARY ARRAY], "
@@ -1759,6 +1760,7 @@ public class PDataTypeTest {
              + "FLOAT ARRAY=[BINARY ARRAY, DECIMAL ARRAY, DOUBLE ARRAY, FLOAT ARRAY, VARBINARY ARRAY], "
              + "INTEGER=[BIGINT, BINARY, DECIMAL, DOUBLE, FLOAT, INTEGER, VARBINARY], "
              + "INTEGER ARRAY=[BIGINT ARRAY, BINARY ARRAY, DECIMAL ARRAY, DOUBLE ARRAY, FLOAT ARRAY, INTEGER ARRAY, VARBINARY ARRAY], "
+             + "JSON=[BINARY, JSON, VARBINARY], "
              + "SMALLINT=[BIGINT, BINARY, DECIMAL, DOUBLE, FLOAT, INTEGER, SMALLINT, VARBINARY], "
              + "SMALLINT ARRAY=[BIGINT ARRAY, BINARY ARRAY, DECIMAL ARRAY, DOUBLE ARRAY, FLOAT ARRAY, INTEGER ARRAY, SMALLINT ARRAY, VARBINARY ARRAY], "
              + "TIME=[BINARY, DATE, TIME, TIMESTAMP, VARBINARY], "
@@ -1785,9 +1787,10 @@ public class PDataTypeTest {
              + "UNSIGNED_TIMESTAMP ARRAY=[BINARY ARRAY, DATE ARRAY, TIME ARRAY, TIMESTAMP ARRAY, UNSIGNED_DATE ARRAY, UNSIGNED_TIME ARRAY, UNSIGNED_TIMESTAMP ARRAY, VARBINARY ARRAY], "
              + "UNSIGNED_TINYINT=[BIGINT, BINARY, DECIMAL, DOUBLE, FLOAT, INTEGER, SMALLINT, TINYINT, UNSIGNED_DOUBLE, UNSIGNED_FLOAT, UNSIGNED_INT, UNSIGNED_LONG, UNSIGNED_SMALLINT, UNSIGNED_TINYINT, VARBINARY], "
              + "UNSIGNED_TINYINT ARRAY=[BIGINT ARRAY, BINARY ARRAY, DECIMAL ARRAY, DOUBLE ARRAY, FLOAT ARRAY, INTEGER ARRAY, SMALLINT ARRAY, TINYINT ARRAY, UNSIGNED_DOUBLE ARRAY, UNSIGNED_FLOAT ARRAY, UNSIGNED_INT ARRAY, UNSIGNED_LONG ARRAY, UNSIGNED_SMALLINT ARRAY, UNSIGNED_TINYINT ARRAY, VARBINARY ARRAY], "
-             + "VARBINARY=[BINARY, VARBINARY], "
+             + "VARBINARY=[BINARY, VARBINARY, VARBINARY_ENCODED], "
              + "VARBINARY ARRAY=[BINARY ARRAY, VARBINARY ARRAY], "
-             + "VARCHAR=[BINARY, CHAR, VARBINARY, VARCHAR], "
+             + "VARBINARY_ENCODED=[BINARY, VARBINARY, VARBINARY_ENCODED], "
+             + "VARCHAR=[BINARY, CHAR, VARBINARY, VARBINARY_ENCODED, VARCHAR], "
              + "VARCHAR ARRAY=[BINARY ARRAY, CHAR ARRAY, VARBINARY ARRAY, VARCHAR ARRAY]}", 
              coercibleToMap.toString());
     }
@@ -1895,7 +1898,7 @@ public class PDataTypeTest {
         final byte[] lowerRange = PTimestamp.INSTANCE.toBytes(ts1);
         Timestamp ts2 = new Timestamp(now + MILLIS_IN_DAY);
         final byte[] upperRange = PTimestamp.INSTANCE.toBytes(ts2);
-        KeyRange range = PTimestamp.INSTANCE.getKeyRange(lowerRange, false, upperRange, false);
+        KeyRange range = PTimestamp.INSTANCE.getKeyRange(lowerRange, false, upperRange, false, SortOrder.ASC);
         Timestamp ts3 = new Timestamp(now + 1);
         // Rolled up to next millis
         final byte[] expectedLowerRange = PTimestamp.INSTANCE.toBytes(ts3);
@@ -1911,7 +1914,7 @@ public class PDataTypeTest {
         final byte[] lowerRange = PTimestamp.INSTANCE.toBytes(ts1, SortOrder.DESC);
         Timestamp ts2 = new Timestamp(now);
         final byte[] upperRange = PTimestamp.INSTANCE.toBytes(ts2, SortOrder.DESC);
-        KeyRange range = PTimestamp.INSTANCE.getKeyRange(lowerRange, false, upperRange, false);
+        KeyRange range = PTimestamp.INSTANCE.getKeyRange(lowerRange, false, upperRange, false, SortOrder.DESC);
         Timestamp ts3 = DateUtil.getTimestamp(now + MILLIS_IN_DAY - 1,  999999);
         // Rolled up to next millis
         final byte[] expectedLowerRange = PTimestamp.INSTANCE.toBytes(ts3, SortOrder.DESC);

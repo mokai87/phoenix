@@ -35,6 +35,7 @@ import org.apache.hadoop.hbase.regionserver.HRegionServer;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.VersionInfo;
 import org.apache.phoenix.end2end.NeedsOwnMiniClusterTest;
+import org.apache.phoenix.end2end.ServerMetadataCacheTestImpl;
 import org.apache.phoenix.hbase.index.covered.ColumnGroup;
 import org.apache.phoenix.hbase.index.covered.CoveredColumn;
 import org.apache.phoenix.hbase.index.covered.CoveredColumnIndexSpecifierBuilder;
@@ -129,7 +130,7 @@ public class FailForUnsupportedHBaseVersionsIT {
                     "testDoesNotStartRegionServerForUnsupportedCompressionAndVersion"));
             byte[] family = Bytes.toBytes("f");
             
-            descBuilder.addColumnFamily(ColumnFamilyDescriptorBuilder.of(family));
+            descBuilder.setColumnFamily(ColumnFamilyDescriptorBuilder.of(family));
             TableDescriptor desc=descBuilder.build();
             // enable indexing to a non-existant index table
             String indexTableName = "INDEX_TABLE";
@@ -160,6 +161,7 @@ public class FailForUnsupportedHBaseVersionsIT {
 
         } finally {
             // cleanup
+            ServerMetadataCacheTestImpl.resetCache();
             util.shutdownMiniCluster();
         }
     }

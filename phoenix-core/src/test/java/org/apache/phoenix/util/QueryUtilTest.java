@@ -23,10 +23,13 @@ import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
 import java.sql.Types;
+import java.util.Arrays;
 import java.util.Properties;
 
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.HConstants;
+import org.apache.hadoop.hbase.client.TestZKConnectionRegistry;
+import org.apache.phoenix.jdbc.ZKConnectionInfo;
 import org.apache.phoenix.parse.HintNode.Hint;
 import org.junit.Test;
 
@@ -121,6 +124,9 @@ public class QueryUtilTest {
         Properties props = new Properties();
         // standard lookup. this already checks if we set hbase.zookeeper.clientPort
         Configuration conf = new Configuration(false);
+        // Need this for HBase 3 where ZK is not the default
+        conf.set(HConstants.CLIENT_CONNECTION_REGISTRY_IMPL_CONF_KEY,
+            ZKConnectionInfo.ZK_REGISTRY_NAME);
         conf.set(HConstants.ZOOKEEPER_QUORUM, "localhost");
         conf.set(HConstants.ZOOKEEPER_CLIENT_PORT, "2181");
         String conn = QueryUtil.getConnectionUrl(props, conf);
@@ -141,18 +147,25 @@ public class QueryUtilTest {
 
     private void validateUrl(String url) {
         String prefix = PhoenixRuntime.JDBC_PROTOCOL + PhoenixRuntime.JDBC_PROTOCOL_SEPARATOR;
-        assertTrue("JDBC URL missing jdbc protocol prefix", url.startsWith(prefix));
+        String zkPrefix = PhoenixRuntime.JDBC_PROTOCOL_ZK+ PhoenixRuntime.JDBC_PROTOCOL_SEPARATOR;
+        String masterPrefix = PhoenixRuntime.JDBC_PROTOCOL_MASTER + PhoenixRuntime.JDBC_PROTOCOL_SEPARATOR;
+        String rpcPrefix = PhoenixRuntime.JDBC_PROTOCOL_RPC + PhoenixRuntime.JDBC_PROTOCOL_SEPARATOR;
+
+        assertTrue("JDBC URL missing jdbc protocol prefix",
+            url.startsWith(prefix) || url.startsWith(zkPrefix) || url.startsWith(masterPrefix)
+                    || url.startsWith(rpcPrefix));
         assertTrue("JDBC URL missing jdbc terminator suffix", url.endsWith(";"));
+        url = url.replaceAll("\\\\:", "=");
         // remove the prefix, should only be left with server[,server...]:port:/znode
-        url = url.substring(prefix.length());
         String[] splits = url.split(":");
+        splits = Arrays.copyOfRange(splits, 2, splits.length);
         assertTrue("zk details should contain at least server component", splits.length >= 1);
         // make sure that each server is comma separated
-        String[] servers = splits[0].split(",");
+        String[] servers = splits[0].replaceAll("=", "\\\\:").split(",");
         for(String server: servers){
             assertFalse("Found whitespace in server names for url: " + url, server.contains(" "));
         }
-        if (splits.length >= 2) {
+        if (splits.length >= 2 && !splits[1].isEmpty()) {
             // second bit is a port number, should not through
             try {
                 Integer.parseInt(splits[1]);

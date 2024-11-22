@@ -54,7 +54,6 @@ import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.CellUtil;
 import org.apache.hadoop.hbase.HBaseIOException;
-import org.apache.hadoop.hbase.HTableDescriptor;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.client.Admin;
 import org.apache.hadoop.hbase.client.Mutation;
@@ -62,6 +61,7 @@ import org.apache.hadoop.hbase.client.Result;
 import org.apache.hadoop.hbase.client.ResultScanner;
 import org.apache.hadoop.hbase.client.Scan;
 import org.apache.hadoop.hbase.client.Table;
+import org.apache.hadoop.hbase.client.TableDescriptor;
 import org.apache.hadoop.hbase.coprocessor.ObserverContext;
 import org.apache.hadoop.hbase.coprocessor.RegionCoprocessorEnvironment;
 import org.apache.hadoop.hbase.coprocessor.SimpleRegionObserver;
@@ -344,7 +344,7 @@ public class IndexToolIT extends BaseTest {
                 explainPlanAttributes.getExplainScanType());
             final String expectedTableName;
             if (localIndex) {
-                expectedTableName = dataTableFullName;
+                expectedTableName = indexTableFullName + "(" + dataTableFullName + ")";
             } else {
                 expectedTableName = indexTableFullName;
             }
@@ -652,11 +652,11 @@ public class IndexToolIT extends BaseTest {
             TableName hDataName = TableName.valueOf(
                     SchemaUtil.getPhysicalHBaseTableName(schemaName, dataTableName, namespaceMapped)
                     .getBytes());
-            HTableDescriptor dataTD = admin.getTableDescriptor(hDataName);
+            TableDescriptor dataTD = admin.getDescriptor(hDataName);
             admin.disableTable(hDataName);
             admin.deleteTable(hDataName);
             admin.createTable(dataTD, splitPoints);
-            assertEquals(targetNumRegions, admin.getTableRegions(hDataName).size());
+            assertEquals(targetNumRegions, admin.getRegions(hDataName).size());
 
             // insert data where index column values start with a, b, c, d
             int idCounter = 1;
@@ -686,7 +686,7 @@ public class IndexToolIT extends BaseTest {
             TableName hIndexName = TableName.valueOf(
                 SchemaUtil.getPhysicalHBaseTableName(schemaName, indexTableName, namespaceMapped)
                 .getBytes());
-            assertEquals(targetNumRegions, admin.getTableRegions(hIndexName).size());
+            assertEquals(targetNumRegions, admin.getRegions(hIndexName).size());
             List<Cell> values = new ArrayList<>();
             // every index region should have been written to, if the index table was properly split uniformly
             for (HRegion region : getUtility().getHBaseCluster().getRegions(hIndexName)) {
@@ -821,8 +821,10 @@ public class IndexToolIT extends BaseTest {
         String expectedExplainPlan;
         if (localIndex) {
             expectedExplainPlan = String.format(" RANGE SCAN OVER %s [1,",
-                normalizeTableNames ? SchemaUtil.normalizeIdentifier(dataTableFullName)
-                        : dataTableFullName);
+                    normalizeTableNames ?
+                            SchemaUtil.normalizeIdentifier(indexTableFullName) + "(" +
+                                    SchemaUtil.normalizeIdentifier(dataTableFullName) + ")":
+                            indexTableFullName + "(" + dataTableFullName + ")");
         } else {
             expectedExplainPlan = String.format(" RANGE SCAN OVER %s",
                 normalizeTableNames ? SchemaUtil.normalizeIdentifier(indexTableFullName)
@@ -963,11 +965,12 @@ public class IndexToolIT extends BaseTest {
             props.setProperty(PhoenixRuntime.TENANT_ID_ATTRIB, tenantId);
         }
 
-        try (Connection conn =
-                     DriverManager.getConnection(getUrl(), props)) {
-            PTable indexTable = PhoenixRuntime.getTableNoCache(conn,
-                   SchemaUtil.normalizeFullTableName(SchemaUtil.getTableName(schemaName, indexTableName)));
-            PTable dataTable = PhoenixRuntime.getTableNoCache(conn, SchemaUtil.normalizeFullTableName(SchemaUtil.getTableName(schemaName, dataTableName)));
+        try (PhoenixConnection conn =
+                (PhoenixConnection) DriverManager.getConnection(getUrl(), props)) {
+            PTable indexTable = conn.getTableNoCache(SchemaUtil
+                    .normalizeFullTableName(SchemaUtil.getTableName(schemaName, indexTableName)));
+            PTable dataTable = conn.getTableNoCache(SchemaUtil
+                    .normalizeFullTableName(SchemaUtil.getTableName(schemaName, dataTableName)));
             boolean transactional = dataTable.isTransactional();
             boolean localIndex = PTable.IndexType.LOCAL.equals(indexTable.getIndexType());
             if ((localIndex || !transactional) && !useSnapshot) {

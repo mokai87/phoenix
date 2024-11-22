@@ -22,11 +22,13 @@ import org.apache.phoenix.end2end.ParallelStatsDisabledTest;
 import org.apache.phoenix.query.ConnectionQueryServices;
 import org.apache.phoenix.query.QueryConstants;
 import org.apache.phoenix.query.QueryServices;
+import org.apache.phoenix.query.QueryServicesOptions;
 import org.apache.phoenix.schema.PName;
 import org.apache.phoenix.schema.types.PVarchar;
 import org.apache.phoenix.util.SchemaUtil;
 import static org.apache.phoenix.util.TestUtil.DEFAULT_SCHEMA_NAME;
 
+import org.apache.phoenix.util.ValidateLastDDLTimestampUtil;
 import org.junit.AfterClass;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
@@ -41,8 +43,8 @@ import java.sql.Statement;
 import java.util.Properties;
 
 import org.mockito.Mockito;
-import static org.mockito.Matchers.anyLong;
-import static org.mockito.Matchers.eq;
+import static org.mockito.ArgumentMatchers.anyLong;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.isNull;
 import static org.mockito.Mockito.reset;
 import static org.mockito.Mockito.times;
@@ -61,6 +63,8 @@ public class UpdateCacheConnectionLevelPropIT extends ParallelStatsDisabledIT {
     private static Connection conn1;
     private static Connection conn2;
     private static ConnectionQueryServices spyForConn2;
+    private boolean isLastDDLTimestampValidationEnabled
+            = ValidateLastDDLTimestampUtil.getValidateLastDdlTimestampEnabled(config);
 
     @AfterClass
     public static synchronized void freeResources() {
@@ -85,14 +89,16 @@ public class UpdateCacheConnectionLevelPropIT extends ParallelStatsDisabledIT {
         setUpTableAndConnections(fullTableName, null,
                 String.valueOf(connUpdateCacheFrequency));
 
-        // There should only be a single call to getTable() for fetching the table's metadata
+        // There should only be no call to getTable() for fetching the table's metadata since
+        // it will be in the CQSI cache
         int numExecutions = 2;
-        int numExpectedGetTableCalls = 1;
+        int numExpectedGetTableCalls = 0;
         verifyExpectedGetTableCalls(fullTableName, numExecutions, numExpectedGetTableCalls);
 
         // Wait for a period of 'connUpdateCacheFrequency' and verify that there was one new call to
         // getTable() for fetching the table's metadata
         Thread.sleep(connUpdateCacheFrequency);
+        numExpectedGetTableCalls = 1;
         verifyExpectedGetTableCalls(fullTableName, numExecutions, numExpectedGetTableCalls);
     }
 
@@ -106,15 +112,17 @@ public class UpdateCacheConnectionLevelPropIT extends ParallelStatsDisabledIT {
         String fullTableName = DEFAULT_SCHEMA_NAME + QueryConstants.NAME_SEPARATOR +
                 generateUniqueName();
 
-        // There should only be a single call to getTable() for fetching the table's metadata
+        // There should only be no call to getTable() for fetching the table's metadata since
+        // it will be in the CQSI cache
         int numExecutions = 2;
-        int numExpectedGetTableCalls = 1;
+        int numExpectedGetTableCalls = 0;
         setUpTableAndConnections(fullTableName, String.valueOf(tableUpdateCacheFrequency), null);
         verifyExpectedGetTableCalls(fullTableName, numExecutions, numExpectedGetTableCalls);
 
         // Wait for a period of 'tableUpdateCacheFrequency' and verify that there was one new call
         // to getTable() for fetching the table's metadata
         Thread.sleep(tableUpdateCacheFrequency);
+        numExpectedGetTableCalls = 1;
         verifyExpectedGetTableCalls(fullTableName, numExecutions, numExpectedGetTableCalls);
     }
 
@@ -131,6 +139,12 @@ public class UpdateCacheConnectionLevelPropIT extends ParallelStatsDisabledIT {
         // both connection and table level properties are not set
         int numExecutions = 2;
         int numExpectedGetTableCalls = 4; // 2 for SELECTs, and 2 for UPSERTs
+
+        // there will be no getTable calls if we are validating last_ddl_timestamps
+        // and schema has not changed.
+        if (isLastDDLTimestampValidationEnabled) {
+            numExpectedGetTableCalls = 0;
+        }
         setUpTableAndConnections(fullTableName, null, null);
         verifyExpectedGetTableCalls(fullTableName, numExecutions, numExpectedGetTableCalls);
     }
@@ -147,9 +161,10 @@ public class UpdateCacheConnectionLevelPropIT extends ParallelStatsDisabledIT {
         String fullTableName = DEFAULT_SCHEMA_NAME + QueryConstants.NAME_SEPARATOR +
                 generateUniqueName();
 
-        // There should only be a single call to getTable() for fetching the table's metadata
+        // There should only be no call to getTable() for fetching the table's metadata since
+        // it will be in the CQSI cache
         int numExecutions = 2;
-        int numExpectedGetTableCalls = 1;
+        int numExpectedGetTableCalls = 0;
         setUpTableAndConnections(fullTableName, String.valueOf(tableUpdateCacheFrequency),
                 String.valueOf(connUpdateCacheFrequency));
         verifyExpectedGetTableCalls(fullTableName, numExecutions, numExpectedGetTableCalls);

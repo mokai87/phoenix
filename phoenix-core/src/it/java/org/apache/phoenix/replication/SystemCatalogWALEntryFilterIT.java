@@ -18,12 +18,15 @@
 package org.apache.phoenix.replication;
 
 import java.io.IOException;
+import java.sql.DriverManager;
 import java.util.List;
 import java.util.Properties;
 import java.util.UUID;
 
 import org.apache.hadoop.hbase.Cell;
+import org.apache.hadoop.hbase.CellBuilderFactory;
 import org.apache.hadoop.hbase.CellUtil;
+import org.apache.hadoop.hbase.CellBuilderType;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.hbase.client.Connection;
 import org.apache.hadoop.hbase.client.ConnectionFactory;
@@ -41,6 +44,7 @@ import org.apache.hadoop.hbase.wal.WALKeyImpl;
 import org.apache.phoenix.end2end.ParallelStatsDisabledIT;
 import org.apache.phoenix.end2end.ParallelStatsDisabledTest;
 import org.apache.phoenix.hbase.index.wal.IndexedKeyValue;
+import org.apache.phoenix.jdbc.PhoenixConnection;
 import org.apache.phoenix.jdbc.PhoenixDatabaseMetaData;
 import org.apache.phoenix.mapreduce.util.ConnectionUtil;
 import org.apache.phoenix.schema.PTable;
@@ -94,12 +98,12 @@ public class SystemCatalogWALEntryFilterIT extends ParallelStatsDisabledIT {
     Properties tenantProperties = new Properties();
     tenantProperties.setProperty("TenantId", TENANT_ID);
     //create two versions of a view -- one with a tenantId and one without
-    try (java.sql.Connection connection =
-             ConnectionUtil.getInputConnection(getUtility().getConfiguration(), tenantProperties)) {
+    try (PhoenixConnection connection = (PhoenixConnection) ConnectionUtil
+            .getInputConnection(getUtility().getConfiguration(), tenantProperties)) {
       ensureTableCreated(getUrl(), TestUtil.ENTITY_HISTORY_TABLE_NAME);
       connection.createStatement().execute(CREATE_TENANT_VIEW_SQL);
-      catalogTable = PhoenixRuntime.getTable(connection, PhoenixDatabaseMetaData.SYSTEM_CATALOG_NAME);
-      childLinkTable = PhoenixRuntime.getTable(connection, PhoenixDatabaseMetaData.SYSTEM_CHILD_LINK_NAME);
+      catalogTable = connection.getTable(PhoenixDatabaseMetaData.SYSTEM_CATALOG_NAME);
+      childLinkTable = connection.getTable(PhoenixDatabaseMetaData.SYSTEM_CHILD_LINK_NAME);
       walKeyCatalog = new WALKeyImpl(REGION, TableName.valueOf(
         PhoenixDatabaseMetaData.SYSTEM_CATALOG_NAME), 0, 0, uuid);
       walKeyChildLink = new WALKeyImpl(REGION, TableName.valueOf(
@@ -120,7 +124,12 @@ public class SystemCatalogWALEntryFilterIT extends ParallelStatsDisabledIT {
     //Cell is nonsense but we should auto pass because the table name's not System.Catalog
     WAL.Entry entry = new WAL.Entry(new WALKeyImpl(REGION,
         TableName.valueOf(TestUtil.ENTITY_HISTORY_TABLE_NAME), System.currentTimeMillis()), new WALEdit());
-    entry.getEdit().add(CellUtil.createCell(Bytes.toBytes("foo")));
+    entry.getEdit().add(
+            CellBuilderFactory.create(
+                    CellBuilderType.DEEP_COPY)
+                    .setRow(Bytes.toBytes("foo"))
+                    .setType(Cell.Type.Put)
+                    .build());
     SystemCatalogWALEntryFilter filter = new SystemCatalogWALEntryFilter();
     Assert.assertEquals(1, filter.filter(entry).getEdit().size());
   }
@@ -286,7 +295,7 @@ public class SystemCatalogWALEntryFilterIT extends ParallelStatsDisabledIT {
     boolean isChildLinkForTenantId = row.contains(tenantId)
       && CellUtil.matchingQualifier(cell,
       PhoenixDatabaseMetaData.LINK_TYPE_BYTES);
-    boolean isDeleteMarkerForLinkRow = row.contains(tenantId) && CellUtil.isDeleteFamily(cell);
+    boolean isDeleteMarkerForLinkRow = row.contains(tenantId) && cell.getType() == Cell.Type.DeleteFamily;
     return isTenantIdLeading || isChildLinkForTenantId || isDeleteMarkerForLinkRow;
   }
 
@@ -321,7 +330,7 @@ public class SystemCatalogWALEntryFilterIT extends ParallelStatsDisabledIT {
     int tenantCount = 0;
     int nonTenantCount = 0;
     for (Cell cell : entry.getEdit().getCells()) {
-      if (CellUtil.isDeleteFamily(cell)) {
+      if (cell.getType() == Cell.Type.DeleteFamily) {
         if (isTenantOwnedCell(cell, TENANT_ID)) {
           tenantCount = tenantCount + 1;
         } else {
@@ -385,17 +394,14 @@ public class SystemCatalogWALEntryFilterIT extends ParallelStatsDisabledIT {
   private static void dropTenantView() throws Exception {
     Properties tenantProperties = new Properties();
     tenantProperties.setProperty("TenantId", TENANT_ID);
-    try (java.sql.Connection connection =
-        ConnectionUtil.getInputConnection(getUtility().getConfiguration(), tenantProperties)) {
+    try (java.sql.Connection connection = DriverManager.getConnection(getUrl(), tenantProperties)) {
       connection.createStatement().execute(DROP_TENANT_VIEW_SQL);
       connection.commit();
     }
   }
 
   private static void dropNonTenantView() throws Exception {
-    try (java.sql.Connection connection =
-        ConnectionUtil.getInputConnection(getUtility().getConfiguration(), new Properties())) {
-
+    try (java.sql.Connection connection = DriverManager.getConnection(getUrl())) {
       connection.createStatement().execute(DROP_NONTENANT_VIEW_SQL);
     }
   }
@@ -403,16 +409,14 @@ public class SystemCatalogWALEntryFilterIT extends ParallelStatsDisabledIT {
   private static void createTenantView() throws Exception {
     Properties tenantProperties = new Properties();
     tenantProperties.setProperty("TenantId", TENANT_ID);
-    try (java.sql.Connection connection =
-        ConnectionUtil.getInputConnection(getUtility().getConfiguration(), tenantProperties)) {
+    try (java.sql.Connection connection = DriverManager.getConnection(getUrl(), tenantProperties)) {
       connection.createStatement().execute(CREATE_TENANT_VIEW_SQL);
       connection.commit();
     }
   }
 
   private static void createNonTenantView() throws Exception {
-    try (java.sql.Connection connection =
-        ConnectionUtil.getInputConnection(getUtility().getConfiguration(), new Properties())) {
+    try (java.sql.Connection connection = DriverManager.getConnection(getUrl())) {
       connection.createStatement().execute(CREATE_NONTENANT_VIEW_SQL);
       connection.commit();
     }

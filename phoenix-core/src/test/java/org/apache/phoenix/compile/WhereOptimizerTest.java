@@ -20,6 +20,7 @@ package org.apache.phoenix.compile;
 import static org.apache.phoenix.query.KeyRange.EVERYTHING_RANGE;
 import static org.apache.phoenix.query.KeyRange.getKeyRange;
 import static org.apache.phoenix.query.QueryConstants.MILLIS_IN_DAY;
+import static org.apache.phoenix.util.PhoenixRuntime.TENANT_ID_ATTRIB;
 import static org.apache.phoenix.util.TestUtil.BINARY_NAME;
 import static org.apache.phoenix.util.TestUtil.BTABLE_NAME;
 import static org.apache.phoenix.util.TestUtil.TEST_PROPERTIES;
@@ -44,15 +45,46 @@ import java.sql.Date;
 import java.sql.DriverManager;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.sql.Timestamp;
+import java.sql.Types;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Properties;
+import java.util.Random;
+import java.util.Set;
+import java.util.function.Predicate;
+import java.util.stream.Collectors;
+
+import org.apache.commons.lang3.RandomStringUtils;
+import org.apache.phoenix.expression.AndExpression;
+import org.apache.phoenix.parse.ColumnParseNode;
+import org.apache.phoenix.parse.ParseNode;
+import org.apache.phoenix.parse.SQLParser;
+import org.apache.phoenix.parse.SelectStatement;
+import org.apache.phoenix.schema.AmbiguousColumnException;
+import org.apache.phoenix.schema.ColumnNotFoundException;
+import org.apache.phoenix.schema.ColumnRef;
+import org.apache.phoenix.schema.SortOrder;
+import org.apache.phoenix.schema.PColumnFamily;
+import org.apache.phoenix.schema.PTable;
+import org.apache.phoenix.schema.TableRef;
+import org.apache.phoenix.schema.types.PChar;
+import org.apache.phoenix.schema.types.PDate;
+import org.apache.phoenix.schema.types.PDataType;
+import org.apache.phoenix.schema.types.PDecimal;
+import org.apache.phoenix.schema.types.PDouble;
+import org.apache.phoenix.schema.types.PInteger;
+import org.apache.phoenix.schema.types.PLong;
+import org.apache.phoenix.schema.types.PTimestamp;
+import org.apache.phoenix.schema.types.PUnsignedLong;
+import org.apache.phoenix.schema.types.PVarchar;
+import org.apache.phoenix.thirdparty.com.google.common.base.Optional;
 import org.apache.phoenix.thirdparty.com.google.common.collect.Lists;
+import org.apache.hadoop.hbase.CompareOperator;
 import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.client.Scan;
-import org.apache.hadoop.hbase.filter.CompareFilter.CompareOp;
 import org.apache.hadoop.hbase.filter.Filter;
 import org.apache.hadoop.hbase.filter.FilterList;
 import org.apache.hadoop.hbase.filter.FilterList.Operator;
@@ -73,19 +105,10 @@ import org.apache.phoenix.jdbc.PhoenixPreparedStatement;
 import org.apache.phoenix.query.BaseConnectionlessQueryTest;
 import org.apache.phoenix.query.KeyRange;
 import org.apache.phoenix.query.QueryConstants;
-import org.apache.phoenix.schema.ColumnNotFoundException;
-import org.apache.phoenix.schema.ColumnRef;
-import org.apache.phoenix.schema.SortOrder;
-import org.apache.phoenix.schema.types.PChar;
-import org.apache.phoenix.schema.types.PDate;
-import org.apache.phoenix.schema.types.PDecimal;
-import org.apache.phoenix.schema.types.PDouble;
-import org.apache.phoenix.schema.types.PInteger;
-import org.apache.phoenix.schema.types.PLong;
-import org.apache.phoenix.schema.types.PUnsignedLong;
-import org.apache.phoenix.schema.types.PVarchar;
+import org.apache.phoenix.thirdparty.com.google.common.collect.Sets;
 import org.apache.phoenix.util.ByteUtil;
 import org.apache.phoenix.util.DateUtil;
+import org.apache.phoenix.util.EncodedColumnsUtil;
 import org.apache.phoenix.util.PhoenixRuntime;
 import org.apache.phoenix.util.PropertiesUtil;
 import org.apache.phoenix.util.ScanUtil;
@@ -95,7 +118,69 @@ import org.apache.phoenix.util.TestUtil;
 import org.junit.Test;
 
 public class WhereOptimizerTest extends BaseConnectionlessQueryTest {
-    
+
+    private static class TestWhereExpressionCompiler extends ExpressionCompiler {
+        private boolean disambiguateWithFamily;
+
+        public TestWhereExpressionCompiler(StatementContext context) {
+            super(context);
+        }
+
+        @Override
+        public Expression visit(ColumnParseNode node) throws SQLException {
+            ColumnRef ref = resolveColumn(node);
+            TableRef tableRef = ref.getTableRef();
+            Expression newColumnExpression = ref.newColumnExpression(node.isTableNameCaseSensitive(), node.isCaseSensitive());
+            if (tableRef.equals(context.getCurrentTable()) && !SchemaUtil.isPKColumn(ref.getColumn())) {
+                byte[] cq = tableRef.getTable().getImmutableStorageScheme() == PTable.ImmutableStorageScheme.SINGLE_CELL_ARRAY_WITH_OFFSETS
+                        ? QueryConstants.SINGLE_KEYVALUE_COLUMN_QUALIFIER_BYTES : ref.getColumn().getColumnQualifierBytes();
+                // track the where condition columns. Later we need to ensure the Scan in HRS scans these column CFs
+                context.addWhereConditionColumn(ref.getColumn().getFamilyName().getBytes(), cq);
+            }
+            return newColumnExpression;
+        }
+
+        @Override
+        protected ColumnRef resolveColumn(ColumnParseNode node) throws SQLException {
+            ColumnRef ref = super.resolveColumn(node);
+            if (disambiguateWithFamily) {
+                return ref;
+            }
+            PTable table = ref.getTable();
+            // Track if we need to compare KeyValue during filter evaluation
+            // using column family. If the column qualifier is enough, we
+            // just use that.
+            if (!SchemaUtil.isPKColumn(ref.getColumn())) {
+                if (!EncodedColumnsUtil.usesEncodedColumnNames(table)
+                        || ref.getColumn().isDynamic()) {
+                    try {
+                        table.getColumnForColumnName(ref.getColumn().getName().getString());
+                    } catch (AmbiguousColumnException e) {
+                        disambiguateWithFamily = true;
+                    }
+                } else {
+                    for (PColumnFamily columnFamily : table.getColumnFamilies()) {
+                        if (columnFamily.getName().equals(ref.getColumn().getFamilyName())) {
+                            continue;
+                        }
+                        try {
+                            table.getColumnForColumnQualifier(columnFamily.getName().getBytes(),
+                                    ref.getColumn().getColumnQualifierBytes());
+                            // If we find the same qualifier name with different columnFamily,
+                            // then set disambiguateWithFamily to true
+                            disambiguateWithFamily = true;
+                            break;
+                        } catch (ColumnNotFoundException ignore) {
+                        }
+                    }
+                }
+            }
+            return ref;
+        }
+    }
+
+    private static final String  TENANT_PREFIX = "Txt00tst1";
+
     private static StatementContext compileStatement(String query) throws SQLException {
         return compileStatement(query, Collections.emptyList(), null);
     }
@@ -409,10 +494,11 @@ public class WhereOptimizerTest extends BaseConnectionlessQueryTest {
     public void testEqualRound() throws Exception {
         String inst = "a";
         String host = "b";
-        Date startDate = DateUtil.parseDate("2012-01-01 00:00:00");
-        Date endDate = DateUtil.parseDate("2012-01-02 00:00:00");
+        Date roundDate = DateUtil.parseDate("2012-01-01 00:00:00");
+        Date startDate = DateUtil.parseDate("2011-12-31 12:00:00");
+        Date endDate = DateUtil.parseDate("2012-01-01 12:00:00"); //Hbase normalizes scans to left closed
         String query = "select * from ptsdb where inst=? and host=? and round(date,'DAY')=?";
-        List<Object> binds = Arrays.<Object>asList(inst,host,startDate);
+        List<Object> binds = Arrays.<Object>asList(inst,host,roundDate);
         Scan scan = compileStatement(query, binds).getScan();
         assertNull(scan.getFilter());
 
@@ -420,10 +506,12 @@ public class WhereOptimizerTest extends BaseConnectionlessQueryTest {
                 PVarchar.INSTANCE.toBytes(host),QueryConstants.SEPARATOR_BYTE_ARRAY,
                 PDate.INSTANCE.toBytes(startDate));
         assertArrayEquals(startRow, scan.getStartRow());
+        assertTrue(scan.includeStartRow());
         byte[] stopRow = ByteUtil.concat(PVarchar.INSTANCE.toBytes(inst),QueryConstants.SEPARATOR_BYTE_ARRAY,
                 PVarchar.INSTANCE.toBytes(host),QueryConstants.SEPARATOR_BYTE_ARRAY,
                 PDate.INSTANCE.toBytes(endDate));
         assertArrayEquals(stopRow, scan.getStopRow());
+        assertFalse(scan.includeStopRow());
     }
 
     @Test
@@ -441,17 +529,18 @@ public class WhereOptimizerTest extends BaseConnectionlessQueryTest {
     public void testBoundaryGreaterThanRound() throws Exception {
         String inst = "a";
         String host = "b";
-        Date startDate = DateUtil.parseDate("2012-01-01 00:00:00");
-        Date endDate = DateUtil.parseDate("2012-01-02 00:00:00");
+        Date roundDate = DateUtil.parseDate("2012-01-01 00:00:00");
+        Date startDate = DateUtil.parseDate("2012-01-01 12:00:00");
         String query = "select * from ptsdb where inst=? and host=? and round(date,'DAY')>?";
-        List<Object> binds = Arrays.<Object>asList(inst,host,startDate);
+        List<Object> binds = Arrays.<Object>asList(inst,host,roundDate);
         Scan scan = compileStatement(query, binds).getScan();
 
         assertNull(scan.getFilter());
         byte[] startRow = ByteUtil.concat(PVarchar.INSTANCE.toBytes(inst),QueryConstants.SEPARATOR_BYTE_ARRAY,
                 PVarchar.INSTANCE.toBytes(host),QueryConstants.SEPARATOR_BYTE_ARRAY,
-                PDate.INSTANCE.toBytes(endDate));
+                PDate.INSTANCE.toBytes(startDate));
         assertArrayEquals(startRow, scan.getStartRow());
+        assertTrue(scan.includeStartRow());
         byte[] stopRow = ByteUtil.nextKey(ByteUtil.concat(PVarchar.INSTANCE.toBytes(inst),QueryConstants.SEPARATOR_BYTE_ARRAY,
                 PVarchar.INSTANCE.toBytes(host),QueryConstants.SEPARATOR_BYTE_ARRAY));
         assertArrayEquals(stopRow, scan.getStopRow());
@@ -462,7 +551,7 @@ public class WhereOptimizerTest extends BaseConnectionlessQueryTest {
         String inst = "a";
         String host = "b";
         Date startDate = DateUtil.parseDate("2012-01-01 00:00:00");
-        Date endDate = DateUtil.parseDate("2012-01-01 00:00:00");
+        Date startDateHalfRange = DateUtil.parseDate("2011-12-31 12:00:00.000");
         String query = "select * from ptsdb where inst=? and host=? and round(date,'DAY')>=?";
         List<Object> binds = Arrays.<Object>asList(inst,host,startDate);
         Scan scan = compileStatement(query, binds).getScan();
@@ -470,7 +559,7 @@ public class WhereOptimizerTest extends BaseConnectionlessQueryTest {
 
         byte[] startRow = ByteUtil.concat(PVarchar.INSTANCE.toBytes(inst),QueryConstants.SEPARATOR_BYTE_ARRAY,
                 PVarchar.INSTANCE.toBytes(host),QueryConstants.SEPARATOR_BYTE_ARRAY,
-                PDate.INSTANCE.toBytes(endDate));
+                PDate.INSTANCE.toBytes(startDateHalfRange));
         assertArrayEquals(startRow, scan.getStartRow());
         byte[] stopRow = ByteUtil.nextKey(ByteUtil.concat(PVarchar.INSTANCE.toBytes(inst),QueryConstants.SEPARATOR_BYTE_ARRAY,
                 PVarchar.INSTANCE.toBytes(host),QueryConstants.SEPARATOR_BYTE_ARRAY));
@@ -481,17 +570,19 @@ public class WhereOptimizerTest extends BaseConnectionlessQueryTest {
     public void testGreaterThanRound() throws Exception {
         String inst = "a";
         String host = "b";
-        Date startDate = DateUtil.parseDate("2012-01-01 01:00:00");
-        Date endDate = DateUtil.parseDate("2012-01-02 00:00:00");
+        Date roundDate = DateUtil.parseDate("2012-01-01 01:00:00");
+        Date startDate = DateUtil.parseDate("2012-01-01 12:00:00"); //Hbase normalizes scans to left closed
         String query = "select * from ptsdb where inst=? and host=? and round(date,'DAY')>?";
-        List<Object> binds = Arrays.<Object>asList(inst,host,startDate);
+        List<Object> binds = Arrays.<Object>asList(inst,host,roundDate);
+
         Scan scan = compileStatement(query, binds).getScan();
         assertNull(scan.getFilter());
 
         byte[] startRow = ByteUtil.concat(PVarchar.INSTANCE.toBytes(inst),QueryConstants.SEPARATOR_BYTE_ARRAY,
                 PVarchar.INSTANCE.toBytes(host),QueryConstants.SEPARATOR_BYTE_ARRAY,
-                PDate.INSTANCE.toBytes(endDate));
+                PDate.INSTANCE.toBytes(startDate));
         assertArrayEquals(startRow, scan.getStartRow());
+        assertTrue(scan.includeStartRow());
         byte[] stopRow = ByteUtil.nextKey(ByteUtil.concat(PVarchar.INSTANCE.toBytes(inst),QueryConstants.SEPARATOR_BYTE_ARRAY,
                 PVarchar.INSTANCE.toBytes(host),QueryConstants.SEPARATOR_BYTE_ARRAY));
         assertArrayEquals(stopRow, scan.getStopRow());
@@ -501,10 +592,10 @@ public class WhereOptimizerTest extends BaseConnectionlessQueryTest {
     public void testLessThanRound() throws Exception {
         String inst = "a";
         String host = "b";
-        Date startDate = DateUtil.parseDate("2012-01-01 01:00:00");
-        Date endDate = DateUtil.parseDate("2012-01-02 00:00:00");
+        Date roundDate = DateUtil.parseDate("2012-01-01 01:00:00");
+        Date endDate = DateUtil.parseDate("2012-01-01 12:00:00"); //Hbase normalizes scans to left closed
         String query = "select * from ptsdb where inst=? and host=? and round(date,'DAY')<?";
-        List<Object> binds = Arrays.<Object>asList(inst,host,startDate);
+        List<Object> binds = Arrays.<Object>asList(inst,host,roundDate);
         Scan scan = compileStatement(query, binds).getScan();
 
         assertNull(scan.getFilter());
@@ -515,16 +606,18 @@ public class WhereOptimizerTest extends BaseConnectionlessQueryTest {
                 PVarchar.INSTANCE.toBytes(host),QueryConstants.SEPARATOR_BYTE_ARRAY,
                 PDate.INSTANCE.toBytes(endDate));
         assertArrayEquals(stopRow, scan.getStopRow());
+        assertTrue(scan.includeStartRow());
     }
 
     @Test
     public void testBoundaryLessThanRound() throws Exception {
         String inst = "a";
         String host = "b";
-        Date startDate = DateUtil.parseDate("2012-01-01 00:00:00");
-        Date endDate = DateUtil.parseDate("2012-01-01 00:00:00");
+        Date roundDate = DateUtil.parseDate("2012-01-01 00:00:00");
+        Date endDate = DateUtil.parseDate("2011-12-31 12:00:00"); //Hbase normalizes scans to left closed
         String query = "select * from ptsdb where inst=? and host=? and round(date,'DAY')<?";
-        List<Object> binds = Arrays.<Object>asList(inst,host,startDate);
+        List<Object> binds = Arrays.<Object>asList(inst,host,roundDate);
+
         Scan scan = compileStatement(query, binds).getScan();
         assertNull(scan.getFilter());
 
@@ -535,16 +628,17 @@ public class WhereOptimizerTest extends BaseConnectionlessQueryTest {
                 PVarchar.INSTANCE.toBytes(host),QueryConstants.SEPARATOR_BYTE_ARRAY,
                 PDate.INSTANCE.toBytes(endDate));
         assertArrayEquals(stopRow, scan.getStopRow());
+        assertFalse(scan.includeStopRow());
     }
 
     @Test
     public void testLessThanOrEqualRound() throws Exception {
         String inst = "a";
         String host = "b";
-        Date startDate = DateUtil.parseDate("2012-01-01 01:00:00");
-        Date endDate = DateUtil.parseDate("2012-01-02 00:00:00");
+        Date roundDate = DateUtil.parseDate("2012-01-01 01:00:00");
+        Date endDate = DateUtil.parseDate("2012-01-01 12:00:00"); //Hbase normalizes scans to left closed
         String query = "select * from ptsdb where inst=? and host=? and round(date,'DAY')<=?";
-        List<Object> binds = Arrays.<Object>asList(inst,host,startDate);
+        List<Object> binds = Arrays.<Object>asList(inst,host,roundDate);
         Scan scan = compileStatement(query, binds).getScan();
         assertNull(scan.getFilter());
 
@@ -555,19 +649,63 @@ public class WhereOptimizerTest extends BaseConnectionlessQueryTest {
                 PVarchar.INSTANCE.toBytes(host),QueryConstants.SEPARATOR_BYTE_ARRAY,
                 PDate.INSTANCE.toBytes(endDate));
         assertArrayEquals(stopRow, scan.getStopRow());
+        assertFalse(scan.includeStopRow());
+    }
+
+    @Test
+    public void testLessThanOrEqualRound2() throws Exception {
+        String inst = "a";
+        String host = "b";
+        Date roundDate = DateUtil.parseDate("2011-12-31 23:00:00");
+        Date endDate = DateUtil.parseDate("2011-12-31 12:00:00"); //Hbase normalizes scans to left closed
+        String query = "select * from ptsdb where inst=? and host=? and round(date,'DAY')<=?";
+        List<Object> binds = Arrays.<Object>asList(inst,host,roundDate);
+        Scan scan = compileStatement(query, binds).getScan();
+        assertNull(scan.getFilter());
+
+        byte[] startRow = ByteUtil.concat(PVarchar.INSTANCE.toBytes(inst),QueryConstants.SEPARATOR_BYTE_ARRAY,
+                PVarchar.INSTANCE.toBytes(host)/*,QueryConstants.SEPARATOR_BYTE_ARRAY*/);
+        assertArrayEquals(startRow, scan.getStartRow());
+        byte[] stopRow = ByteUtil.concat(PVarchar.INSTANCE.toBytes(inst),QueryConstants.SEPARATOR_BYTE_ARRAY,
+                PVarchar.INSTANCE.toBytes(host),QueryConstants.SEPARATOR_BYTE_ARRAY,
+                PDate.INSTANCE.toBytes(endDate));
+        assertArrayEquals(stopRow, scan.getStopRow());
+        assertFalse(scan.includeStopRow());
     }
 
     @Test
     public void testBoundaryLessThanOrEqualRound() throws Exception {
         String inst = "a";
         String host = "b";
-        Date startDate = DateUtil.parseDate("2012-01-01 00:00:00");
-        Date endDate = DateUtil.parseDate("2012-01-02 00:00:00");
+        Date roundDate = DateUtil.parseDate("2012-01-01 00:00:00");
+        Date endDate = DateUtil.parseDate("2012-01-01 12:00:00"); //Hbase normalizes scans to left closed
         String query = "select * from ptsdb where inst=? and host=? and round(date,'DAY')<=?";
-        List<Object> binds = Arrays.<Object>asList(inst,host,startDate);
+        List<Object> binds = Arrays.<Object>asList(inst,host,roundDate);
         Scan scan = compileStatement(query, binds).getScan();
 
         assertNull(scan.getFilter());
+        byte[] startRow = ByteUtil.concat(PVarchar.INSTANCE.toBytes(inst),QueryConstants.SEPARATOR_BYTE_ARRAY,
+                PVarchar.INSTANCE.toBytes(host)/*,QueryConstants.SEPARATOR_BYTE_ARRAY*/);
+        assertArrayEquals(startRow, scan.getStartRow());
+        assertTrue(scan.includeStartRow());
+        byte[] stopRow = ByteUtil.concat(PVarchar.INSTANCE.toBytes(inst),QueryConstants.SEPARATOR_BYTE_ARRAY,
+                PVarchar.INSTANCE.toBytes(host),QueryConstants.SEPARATOR_BYTE_ARRAY,
+                PDate.INSTANCE.toBytes(endDate));
+        assertArrayEquals(stopRow, scan.getStopRow());
+        assertFalse(scan.includeStopRow());
+    }
+
+    @Test
+    public void testLessThanOrEqualFloor() throws Exception {
+        String inst = "a";
+        String host = "b";
+        Date floorDate = DateUtil.parseDate("2012-01-01 01:00:00");
+        Date endDate = DateUtil.parseDate("2012-01-02 00:00:00"); //Hbase normalizes scans to left closed
+        String query = "select * from ptsdb where inst=? and host=? and floor(date,'DAY')<=?";
+        List<Object> binds = Arrays.<Object>asList(inst,host,floorDate);
+        Scan scan = compileStatement(query, binds).getScan();
+        assertNull(scan.getFilter());
+
         byte[] startRow = ByteUtil.concat(PVarchar.INSTANCE.toBytes(inst),QueryConstants.SEPARATOR_BYTE_ARRAY,
                 PVarchar.INSTANCE.toBytes(host)/*,QueryConstants.SEPARATOR_BYTE_ARRAY*/);
         assertArrayEquals(startRow, scan.getStartRow());
@@ -575,6 +713,154 @@ public class WhereOptimizerTest extends BaseConnectionlessQueryTest {
                 PVarchar.INSTANCE.toBytes(host),QueryConstants.SEPARATOR_BYTE_ARRAY,
                 PDate.INSTANCE.toBytes(endDate));
         assertArrayEquals(stopRow, scan.getStopRow());
+        assertFalse(scan.includeStopRow());
+    }
+
+    @Test
+    public void testLessThanOrEqualFloorBoundary() throws Exception {
+        String inst = "a";
+        String host = "b";
+        Date floorDate = DateUtil.parseDate("2012-01-01 00:00:00");
+        Date endDate = DateUtil.parseDate("2012-01-02 00:00:00"); //Hbase normalizes scans to left closed
+        String query = "select * from ptsdb where inst=? and host=? and floor(date,'DAY')<=?";
+        List<Object> binds = Arrays.<Object>asList(inst,host,floorDate);
+        Scan scan = compileStatement(query, binds).getScan();
+        assertNull(scan.getFilter());
+
+        byte[] startRow = ByteUtil.concat(PVarchar.INSTANCE.toBytes(inst),QueryConstants.SEPARATOR_BYTE_ARRAY,
+                PVarchar.INSTANCE.toBytes(host)/*,QueryConstants.SEPARATOR_BYTE_ARRAY*/);
+        assertArrayEquals(startRow, scan.getStartRow());
+        byte[] stopRow = ByteUtil.concat(PVarchar.INSTANCE.toBytes(inst),QueryConstants.SEPARATOR_BYTE_ARRAY,
+                PVarchar.INSTANCE.toBytes(host),QueryConstants.SEPARATOR_BYTE_ARRAY,
+                PDate.INSTANCE.toBytes(endDate));
+        assertArrayEquals(stopRow, scan.getStopRow());
+        assertFalse(scan.includeStopRow());
+    }
+
+    @Test
+    public void testGreaterThanOrEqualFloor() throws Exception {
+        String inst = "a";
+        String host = "b";
+        Date floorDate = DateUtil.parseDate("2012-01-01 01:00:00");
+        Date startDate = DateUtil.parseDate("2012-01-02 00:00:00");
+        String query = "select * from ptsdb where inst=? and host=? and floor(date,'DAY')>=?";
+        List<Object> binds = Arrays.<Object>asList(inst,host,floorDate);
+        Scan scan = compileStatement(query, binds).getScan();
+        assertNull(scan.getFilter());
+
+        byte[] startRow = ByteUtil.concat(PVarchar.INSTANCE.toBytes(inst),QueryConstants.SEPARATOR_BYTE_ARRAY,
+                PVarchar.INSTANCE.toBytes(host),QueryConstants.SEPARATOR_BYTE_ARRAY,
+                PDate.INSTANCE.toBytes(startDate));
+        assertArrayEquals(startRow, scan.getStartRow());
+        byte[] stopRow = ByteUtil.nextKey(ByteUtil.concat(PVarchar.INSTANCE.toBytes(inst),QueryConstants.SEPARATOR_BYTE_ARRAY,
+                PVarchar.INSTANCE.toBytes(host),QueryConstants.SEPARATOR_BYTE_ARRAY));
+        assertArrayEquals(stopRow, scan.getStopRow());
+        assertFalse(scan.includeStopRow());
+    }
+
+    @Test
+    public void testGreaterThanOrEqualFloorBoundary() throws Exception {
+        String inst = "a";
+        String host = "b";
+        Date floorDate = DateUtil.parseDate("2012-01-01 00:00:00");
+        Date startDate = DateUtil.parseDate("2012-01-01 00:00:00");
+        String query = "select * from ptsdb where inst=? and host=? and floor(date,'DAY')>=?";
+        List<Object> binds = Arrays.<Object>asList(inst,host,floorDate);
+        Scan scan = compileStatement(query, binds).getScan();
+        assertNull(scan.getFilter());
+
+        byte[] startRow = ByteUtil.concat(PVarchar.INSTANCE.toBytes(inst),QueryConstants.SEPARATOR_BYTE_ARRAY,
+            PVarchar.INSTANCE.toBytes(host),QueryConstants.SEPARATOR_BYTE_ARRAY,
+            PDate.INSTANCE.toBytes(startDate));
+        assertArrayEquals(startRow, scan.getStartRow());
+        byte[] stopRow = ByteUtil.nextKey(ByteUtil.concat(PVarchar.INSTANCE.toBytes(inst),QueryConstants.SEPARATOR_BYTE_ARRAY,
+                PVarchar.INSTANCE.toBytes(host),QueryConstants.SEPARATOR_BYTE_ARRAY));
+        assertArrayEquals(stopRow, scan.getStopRow());
+        assertFalse(scan.includeStopRow());
+    }
+
+    @Test
+    public void testLessThanOrEqualCeil() throws Exception {
+        String inst = "a";
+        String host = "b";
+        Date ceilDate = DateUtil.parseDate("2012-01-01 01:00:00");
+        Date endDate = DateUtil.parseDate("2012-01-01 00:00:00.001"); //Hbase normalizes scans to left closed
+        String query = "select * from ptsdb where inst=? and host=? and ceil(date,'DAY')<=?";
+        List<Object> binds = Arrays.<Object>asList(inst,host,ceilDate);
+        Scan scan = compileStatement(query, binds).getScan();
+        assertNull(scan.getFilter());
+
+        byte[] startRow = ByteUtil.concat(PVarchar.INSTANCE.toBytes(inst),QueryConstants.SEPARATOR_BYTE_ARRAY,
+                PVarchar.INSTANCE.toBytes(host)/*,QueryConstants.SEPARATOR_BYTE_ARRAY*/);
+        assertArrayEquals(startRow, scan.getStartRow());
+        byte[] stopRow = ByteUtil.concat(PVarchar.INSTANCE.toBytes(inst),QueryConstants.SEPARATOR_BYTE_ARRAY,
+                PVarchar.INSTANCE.toBytes(host),QueryConstants.SEPARATOR_BYTE_ARRAY,
+                PDate.INSTANCE.toBytes(endDate));
+        assertArrayEquals(stopRow, scan.getStopRow());
+        assertFalse(scan.includeStopRow());
+    }
+
+    @Test
+    public void testLessThanOrEqualCeilBoundary() throws Exception {
+        String inst = "a";
+        String host = "b";
+        Date ceilDate = DateUtil.parseDate("2012-01-01 00:00:00");
+        Date endDate = DateUtil.parseDate("2012-01-01 00:00:00.001"); //Hbase normalizes scans to left closed
+        String query = "select * from ptsdb where inst=? and host=? and ceil(date,'DAY')<=?";
+        List<Object> binds = Arrays.<Object>asList(inst,host,ceilDate);
+        Scan scan = compileStatement(query, binds).getScan();
+        assertNull(scan.getFilter());
+
+        byte[] startRow = ByteUtil.concat(PVarchar.INSTANCE.toBytes(inst),QueryConstants.SEPARATOR_BYTE_ARRAY,
+                PVarchar.INSTANCE.toBytes(host)/*,QueryConstants.SEPARATOR_BYTE_ARRAY*/);
+        assertArrayEquals(startRow, scan.getStartRow());
+        byte[] stopRow = ByteUtil.concat(PVarchar.INSTANCE.toBytes(inst),QueryConstants.SEPARATOR_BYTE_ARRAY,
+                PVarchar.INSTANCE.toBytes(host),QueryConstants.SEPARATOR_BYTE_ARRAY,
+                PDate.INSTANCE.toBytes(endDate));
+        assertArrayEquals(stopRow, scan.getStopRow());
+        assertFalse(scan.includeStopRow());
+    }
+
+    @Test
+    public void testGreaterThanOrEqualCeil() throws Exception {
+        String inst = "a";
+        String host = "b";
+        Date ceilDate = DateUtil.parseDate("2012-01-01 01:00:00");
+        Date startDate = DateUtil.parseDate("2012-01-01 00:00:00.001");
+        String query = "select * from ptsdb where inst=? and host=? and ceil(date,'DAY')>=?";
+        List<Object> binds = Arrays.<Object>asList(inst,host,ceilDate);
+        Scan scan = compileStatement(query, binds).getScan();
+        assertNull(scan.getFilter());
+
+        byte[] startRow = ByteUtil.concat(PVarchar.INSTANCE.toBytes(inst),QueryConstants.SEPARATOR_BYTE_ARRAY,
+                PVarchar.INSTANCE.toBytes(host),QueryConstants.SEPARATOR_BYTE_ARRAY,
+                PDate.INSTANCE.toBytes(startDate));
+        assertArrayEquals(startRow, scan.getStartRow());
+        byte[] stopRow = ByteUtil.nextKey(ByteUtil.concat(PVarchar.INSTANCE.toBytes(inst),QueryConstants.SEPARATOR_BYTE_ARRAY,
+                PVarchar.INSTANCE.toBytes(host),QueryConstants.SEPARATOR_BYTE_ARRAY));
+        assertArrayEquals(stopRow, scan.getStopRow());
+        assertFalse(scan.includeStopRow());
+    }
+
+    @Test
+    public void testGreaterThanOrEqualCeilBoundary() throws Exception {
+        String inst = "a";
+        String host = "b";
+        Date ceilDate = DateUtil.parseDate("2012-01-01 00:00:00");
+        Date startDate = DateUtil.parseDate("2011-12-31 00:00:00.001");
+        String query = "select * from ptsdb where inst=? and host=? and ceil(date,'DAY')>=?";
+        List<Object> binds = Arrays.<Object>asList(inst,host,ceilDate);
+        Scan scan = compileStatement(query, binds).getScan();
+        assertNull(scan.getFilter());
+
+        byte[] startRow = ByteUtil.concat(PVarchar.INSTANCE.toBytes(inst),QueryConstants.SEPARATOR_BYTE_ARRAY,
+            PVarchar.INSTANCE.toBytes(host),QueryConstants.SEPARATOR_BYTE_ARRAY,
+            PDate.INSTANCE.toBytes(startDate));
+        assertArrayEquals(startRow, scan.getStartRow());
+        byte[] stopRow = ByteUtil.nextKey(ByteUtil.concat(PVarchar.INSTANCE.toBytes(inst),QueryConstants.SEPARATOR_BYTE_ARRAY,
+                PVarchar.INSTANCE.toBytes(host),QueryConstants.SEPARATOR_BYTE_ARRAY));
+        assertArrayEquals(stopRow, scan.getStopRow());
+        assertFalse(scan.includeStopRow());
     }
 
     @Test
@@ -918,6 +1204,82 @@ public class WhereOptimizerTest extends BaseConnectionlessQueryTest {
         byte[] stopRow = ByteUtil.concat(
             PVarchar.INSTANCE.toBytes(tenantId),StringUtil.padChar(ByteUtil.nextKey(PVarchar.INSTANCE.toBytes(keyPrefix)),15));
         assertArrayEquals(stopRow, scan.getStopRow());
+    }
+
+    @Test
+    public void testLikeExpressionWithDescOrder() throws SQLException {
+        Connection conn = DriverManager.getConnection(getUrl());
+        String tableName = generateUniqueName();
+        conn.createStatement().execute(
+                "CREATE TABLE " + tableName + " (id varchar, name varchar, type decimal, "
+                        + "status integer CONSTRAINT pk PRIMARY KEY(id desc, type))");
+        String query = "SELECT * FROM " + tableName + " where type = 1 and id like 'xy%'";
+        StatementContext context = compileStatement(query);
+        Scan scan = context.getScan();
+
+        assertTrue(scan.getFilter() instanceof SkipScanFilter);
+        SkipScanFilter filter = (SkipScanFilter) scan.getFilter();
+
+        byte[] lowerRange = filter.getSlots().get(0).get(0).getLowerRange();
+        byte[] upperRange = filter.getSlots().get(0).get(0).getUpperRange();
+        boolean lowerInclusive = filter.getSlots().get(0).get(0).isLowerInclusive();
+        boolean upperInclusive = filter.getSlots().get(0).get(0).isUpperInclusive();
+
+        byte[] startRow = PVarchar.INSTANCE.toBytes("xy");
+        byte[] invStartRow = new byte[startRow.length];
+        SortOrder.invert(startRow, 0, invStartRow, 0, startRow.length);
+
+        byte[] stopRow = PVarchar.INSTANCE.toBytes("xz");
+        byte[] invStopRow = new byte[startRow.length];
+        SortOrder.invert(stopRow, 0, invStopRow, 0, stopRow.length);
+
+        assertArrayEquals(invStopRow, lowerRange);
+        assertArrayEquals(invStartRow, upperRange);
+        assertFalse(lowerInclusive);
+        assertTrue(upperInclusive);
+
+        byte[] expectedStartRow = ByteUtil.concat(invStartRow, new byte[]{0},
+                PDecimal.INSTANCE.toBytes(new BigDecimal(1)));
+        assertArrayEquals(expectedStartRow, scan.getStartRow());
+
+        byte[] expectedStopRow = ByteUtil.concat(invStartRow,
+                new byte[]{(byte) (0xFF)}, PDecimal.INSTANCE.toBytes(new BigDecimal(1)),
+                new byte[]{1});
+        assertArrayEquals(expectedStopRow, scan.getStopRow());
+
+        query = "SELECT * FROM " + tableName + " where type = 1 and id like 'x%'";
+        context = compileStatement(query);
+        scan = context.getScan();
+
+        assertTrue(scan.getFilter() instanceof SkipScanFilter);
+        filter = (SkipScanFilter) scan.getFilter();
+
+        lowerRange = filter.getSlots().get(0).get(0).getLowerRange();
+        upperRange = filter.getSlots().get(0).get(0).getUpperRange();
+        lowerInclusive = filter.getSlots().get(0).get(0).isLowerInclusive();
+        upperInclusive = filter.getSlots().get(0).get(0).isUpperInclusive();
+
+        startRow = PVarchar.INSTANCE.toBytes("x");
+        invStartRow = new byte[startRow.length];
+        SortOrder.invert(startRow, 0, invStartRow, 0, startRow.length);
+
+        stopRow = PVarchar.INSTANCE.toBytes("y");
+        invStopRow = new byte[startRow.length];
+        SortOrder.invert(stopRow, 0, invStopRow, 0, stopRow.length);
+
+        assertArrayEquals(invStopRow, lowerRange);
+        assertArrayEquals(invStartRow, upperRange);
+        assertFalse(lowerInclusive);
+        assertTrue(upperInclusive);
+
+        expectedStartRow = ByteUtil.concat(invStartRow, new byte[]{0},
+                PDecimal.INSTANCE.toBytes(new BigDecimal(1)));
+        assertArrayEquals(expectedStartRow, scan.getStartRow());
+
+        expectedStopRow = ByteUtil.concat(invStartRow,
+                new byte[]{(byte) (0xFF)}, PDecimal.INSTANCE.toBytes(new BigDecimal(1)),
+                new byte[]{1});
+        assertArrayEquals(expectedStopRow, scan.getStopRow());
     }
 
     @Test
@@ -1280,8 +1642,8 @@ public class WhereOptimizerTest extends BaseConnectionlessQueryTest {
         List<List<KeyRange>> ranges = scanRanges.getRanges();
         assertEquals(1,ranges.size());
         List<List<KeyRange>> expectedRanges = Collections.singletonList(Arrays.asList(
-                PChar.INSTANCE.getKeyRange(PChar.INSTANCE.toBytes(tenantId1), true, PChar.INSTANCE.toBytes(tenantId1), true),
-                PChar.INSTANCE.getKeyRange(PChar.INSTANCE.toBytes(tenantId2), true, PChar.INSTANCE.toBytes(tenantId2), true)));
+                PChar.INSTANCE.getKeyRange(PChar.INSTANCE.toBytes(tenantId1), true, PChar.INSTANCE.toBytes(tenantId1), true, SortOrder.ASC),
+                PChar.INSTANCE.getKeyRange(PChar.INSTANCE.toBytes(tenantId2), true, PChar.INSTANCE.toBytes(tenantId2), true, SortOrder.ASC)));
         assertEquals(expectedRanges, ranges);
         byte[] startRow = PVarchar.INSTANCE.toBytes(tenantId1);
         assertArrayEquals(startRow, scan.getStartRow());
@@ -1344,10 +1706,10 @@ public class WhereOptimizerTest extends BaseConnectionlessQueryTest {
         List<List<KeyRange>> expectedRanges = Collections.singletonList(Arrays.asList(
                 PChar.INSTANCE.getKeyRange(
                         StringUtil.padChar(PChar.INSTANCE.toBytes("00D"),15), true,
-                        StringUtil.padChar(ByteUtil.nextKey(PChar.INSTANCE.toBytes("00D")),15), false),
+                        StringUtil.padChar(ByteUtil.nextKey(PChar.INSTANCE.toBytes("00D")),15), false, SortOrder.ASC),
                 PChar.INSTANCE.getKeyRange(
                         StringUtil.padChar(PChar.INSTANCE.toBytes("foo"),15), true,
-                        StringUtil.padChar(ByteUtil.nextKey(PChar.INSTANCE.toBytes("foo")),15), false)));
+                        StringUtil.padChar(ByteUtil.nextKey(PChar.INSTANCE.toBytes("foo")),15), false, SortOrder.ASC)));
         assertEquals(expectedRanges, ranges);
     }
 
@@ -2140,6 +2502,92 @@ public class WhereOptimizerTest extends BaseConnectionlessQueryTest {
         assertArrayEquals(stopRow, scan.getStopRow());
     }
 
+    @Test
+    public void testScanRangeForPointLookup() throws SQLException {
+        String tenantId = "000000000000001";
+        String entityId = "002333333333333";
+        String query = String.format("select * from atable where organization_id='%s' and entity_id='%s'",
+                tenantId, entityId);
+        try (Connection conn = DriverManager.getConnection(getUrl())) {
+            QueryPlan optimizedPlan = TestUtil.getOptimizeQueryPlan(conn, query);
+            byte[] startRow = ByteUtil.concat(PVarchar.INSTANCE.toBytes(tenantId), PVarchar.INSTANCE.toBytes(entityId));
+            byte[] stopRow =  ByteUtil.nextKey(startRow);
+            validateScanRangesForPointLookup(optimizedPlan, startRow, stopRow);
+        }
+    }
+
+    @Test
+    public void testScanRangeForPointLookupRVC() throws SQLException {
+        String tenantId = "000000000000001";
+        String entityId = "002333333333333";
+        String query = String.format("select * from atable where (organization_id, entity_id) IN (('%s','%s'))",
+                tenantId, entityId);
+        try (Connection conn = DriverManager.getConnection(getUrl())) {
+            QueryPlan optimizedPlan = TestUtil.getOptimizeQueryPlan(conn, query);
+            byte[] startRow = ByteUtil.concat(PVarchar.INSTANCE.toBytes(tenantId), PVarchar.INSTANCE.toBytes(entityId));
+            byte[] stopRow =  ByteUtil.nextKey(startRow);
+            validateScanRangesForPointLookup(optimizedPlan, startRow, stopRow);
+        }
+    }
+
+    @Test
+    public void testScanRangeForPointLookupWithLimit() throws SQLException {
+        String tenantId = "000000000000001";
+        String entityId = "002333333333333";
+        String query = String.format("select * from atable where organization_id='%s' " +
+                        "and entity_id='%s' LIMIT 1", tenantId, entityId);
+        try (Connection conn = DriverManager.getConnection(getUrl())) {
+            QueryPlan optimizedPlan = TestUtil.getOptimizeQueryPlan(conn, query);
+            byte[] startRow = ByteUtil.concat(PVarchar.INSTANCE.toBytes(tenantId), PVarchar.INSTANCE.toBytes(entityId));
+            byte[] stopRow =  ByteUtil.nextKey(startRow);
+            validateScanRangesForPointLookup(optimizedPlan, startRow, stopRow);
+        }
+    }
+
+    @Test
+    public void testScanRangeForPointLookupAggregate() throws SQLException {
+        String tenantId = "000000000000001";
+        String entityId = "002333333333333";
+        String query = String.format("select count(*) from atable where organization_id='%s' " +
+                "and entity_id='%s'", tenantId, entityId);
+        try (Connection conn = DriverManager.getConnection(getUrl())) {
+            QueryPlan optimizedPlan = TestUtil.getOptimizeQueryPlan(conn, query);
+            byte[] startRow = ByteUtil.concat(PVarchar.INSTANCE.toBytes(tenantId), PVarchar.INSTANCE.toBytes(entityId));
+            byte[] stopRow =  ByteUtil.nextKey(startRow);
+            validateScanRangesForPointLookup(optimizedPlan, startRow, stopRow);
+        }
+    }
+
+    private static void validateScanRangesForPointLookup(QueryPlan optimizedPlan, byte[] startRow, byte[] stopRow) {
+        StatementContext context = optimizedPlan.getContext();
+        ScanRanges scanRanges = context.getScanRanges();
+        assertTrue(scanRanges.isPointLookup());
+        assertEquals(1, scanRanges.getPointLookupCount());
+        // scan from StatementContext has scan range [start, next(start)]
+        Scan scanFromContext = context.getScan();
+        assertArrayEquals(startRow, scanFromContext.getStartRow());
+        assertTrue(scanFromContext.includeStartRow());
+        assertArrayEquals(stopRow, scanFromContext.getStopRow());
+        assertFalse(scanFromContext.includeStopRow());
+
+        List<List<Scan>> scans = optimizedPlan.getScans();
+        assertEquals(1, scans.size());
+        assertEquals(1, scans.get(0).size());
+        Scan scanFromIterator = scans.get(0).get(0);
+        if (optimizedPlan.getLimit() == null && !optimizedPlan.getStatement().isAggregate()) {
+            // scan from iterator has same start and stop row [start, start] i.e a Get
+            assertTrue(scanFromIterator.isGetScan());
+            assertTrue(scanFromIterator.includeStartRow());
+            assertTrue(scanFromIterator.includeStopRow());
+        } else {
+            // in case of limit scan range is same as the one in StatementContext
+            assertArrayEquals(startRow, scanFromIterator.getStartRow());
+            assertTrue(scanFromIterator.includeStartRow());
+            assertArrayEquals(stopRow, scanFromIterator.getStopRow());
+            assertFalse(scanFromIterator.includeStopRow());
+        }
+    }
+
     private static StatementContext compileStatementTenantSpecific(String tenantId, String query, List<Object> binds) throws Exception {
     	PhoenixConnection pconn = getTenantSpecificConnection("tenantId").unwrap(PhoenixConnection.class);
         PhoenixPreparedStatement pstmt = new PhoenixPreparedStatement(pconn, query);
@@ -2377,7 +2825,7 @@ public class WhereOptimizerTest extends BaseConnectionlessQueryTest {
             assertEquals(
                     Arrays.asList(
                         Arrays.asList(
-                                KeyRange.getKeyRange(PChar.INSTANCE.toBytes("A"), false, PChar.INSTANCE.toBytes("D"), true)
+                                KeyRange.getKeyRange(PChar.INSTANCE.toBytes("A"), true, PChar.INSTANCE.toBytes("D"), true)
                                 ),
                         Arrays.asList(
                                 KeyRange.getKeyRange(PChar.INSTANCE.toBytes("EE"), true, KeyRange.UNBOUND, false)
@@ -2385,7 +2833,7 @@ public class WhereOptimizerTest extends BaseConnectionlessQueryTest {
                             ),
                      rowKeyRanges
                     );
-            assertArrayEquals(PChar.INSTANCE.toBytes("BEE"), scan.getStartRow());
+            assertArrayEquals(PChar.INSTANCE.toBytes("AEE"), scan.getStartRow());
             assertArrayEquals(PChar.INSTANCE.toBytes("E"), scan.getStopRow());
         }
     }
@@ -2440,11 +2888,37 @@ public class WhereOptimizerTest extends BaseConnectionlessQueryTest {
             String query = "SELECT * FROM T WHERE A = 'C' and (A,B,C) > ('C','B','X') and C='C'";
             QueryPlan queryPlan = TestUtil.getOptimizeQueryPlan(conn, query);
             Scan scan = queryPlan.getContext().getScan();
-            assertArrayEquals(ByteUtil.concat(PChar.INSTANCE.toBytes("C"), PChar.INSTANCE.toBytes("C"), PChar.INSTANCE.toBytes("C")), scan.getStartRow());
+            //
+            // Note: The optimal scan boundary for the above query is ['CCC' - *), however, I don't see an easy way to fix this currently so prioritizing.  Opened JIRA PHOENIX-5885
+            assertArrayEquals(ByteUtil.concat(PChar.INSTANCE.toBytes("C"), PChar.INSTANCE.toBytes("B"), PChar.INSTANCE.toBytes("C")), scan.getStartRow());
             assertArrayEquals(PChar.INSTANCE.toBytes("D"), scan.getStopRow());
         }
     }
-    
+
+    @Test
+    public void testEqualityAndGreaterThanRVC2() throws SQLException {
+        Properties props = PropertiesUtil.deepCopy(TEST_PROPERTIES);
+        try (Connection conn = DriverManager.getConnection(getUrl(), props)) {
+            conn.createStatement().execute("CREATE TABLE T (\n" +
+                    "    A CHAR(1) NOT NULL,\n" +
+                    "    B CHAR(1) NOT NULL,\n" +
+                    "    C CHAR(1) NOT NULL,\n" +
+                    "    D CHAR(1) NOT NULL,\n" +
+                    "    CONSTRAINT PK PRIMARY KEY (\n" +
+                    "        A,\n" +
+                    "        B,\n" +
+                    "        C,\n" +
+                    "        D\n" +
+                    "    )\n" +
+                    ")");
+            String query = "SELECT * FROM T WHERE A = 'C' and (A,B,C) > ('C','B','A') and C='C'";
+            QueryPlan queryPlan = TestUtil.getOptimizeQueryPlan(conn, query);
+            Scan scan = queryPlan.getContext().getScan();
+            assertArrayEquals(ByteUtil.concat(PChar.INSTANCE.toBytes("C"), PChar.INSTANCE.toBytes("B"), PChar.INSTANCE.toBytes("C")), scan.getStartRow());
+            assertArrayEquals(PChar.INSTANCE.toBytes("D"), scan.getStopRow());
+        }
+    }
+
     @Test
     public void testOrExpressionNonLeadingPKPushToScanBug4602() throws Exception {
         Connection conn = null;
@@ -2558,10 +3032,10 @@ public class WhereOptimizerTest extends BaseConnectionlessQueryTest {
             assertEquals(
                     TestUtil.singleKVFilter(
                         TestUtil.or(
-                                TestUtil.constantComparison(CompareOp.GREATER_OR_EQUAL, pk1Expression, 2),
+                                TestUtil.constantComparison(CompareOperator.GREATER_OR_EQUAL, pk1Expression, 2),
                                 TestUtil.and(
-                                        TestUtil.constantComparison(CompareOp.GREATER_OR_EQUAL, dataExpression, 4),
-                                        TestUtil.constantComparison(CompareOp.LESS, dataExpression, 9)
+                                        TestUtil.constantComparison(CompareOperator.GREATER_OR_EQUAL, dataExpression, 4),
+                                        TestUtil.constantComparison(CompareOperator.LESS, dataExpression, 9)
                                         )
                                 )
                     ),
@@ -2588,11 +3062,11 @@ public class WhereOptimizerTest extends BaseConnectionlessQueryTest {
                       TestUtil.rowKeyFilter(
                             TestUtil.or(
                                     TestUtil.and(
-                                            TestUtil.constantComparison(CompareOp.GREATER_OR_EQUAL,pk1Expression, 2),
-                                            TestUtil.constantComparison(CompareOp.LESS,pk1Expression, 5)),
+                                            TestUtil.constantComparison(CompareOperator.GREATER_OR_EQUAL,pk1Expression, 2),
+                                            TestUtil.constantComparison(CompareOperator.LESS,pk1Expression, 5)),
                                     TestUtil.or(
-                                            TestUtil.constantComparison(CompareOp.GREATER_OR_EQUAL,pk2Expression, 7),
-                                            TestUtil.constantComparison(CompareOp.LESS,pk2Expression, 9))
+                                            TestUtil.constantComparison(CompareOperator.GREATER_OR_EQUAL,pk2Expression, 7),
+                                            TestUtil.constantComparison(CompareOperator.LESS,pk2Expression, 9))
                                     )
                               ),
                      scan.getFilter());
@@ -2608,11 +3082,11 @@ public class WhereOptimizerTest extends BaseConnectionlessQueryTest {
                       TestUtil.rowKeyFilter(
                             TestUtil.or(
                                     TestUtil.and(
-                                            TestUtil.constantComparison(CompareOp.GREATER_OR_EQUAL,pk2Expression, 4),
-                                            TestUtil.constantComparison(CompareOp.LESS,pk2Expression, 6)),
+                                            TestUtil.constantComparison(CompareOperator.GREATER_OR_EQUAL,pk2Expression, 4),
+                                            TestUtil.constantComparison(CompareOperator.LESS,pk2Expression, 6)),
                                     TestUtil.and(
-                                            TestUtil.constantComparison(CompareOp.GREATER_OR_EQUAL,pk2Expression, 8),
-                                            TestUtil.constantComparison(CompareOp.LESS,pk2Expression, 9))
+                                            TestUtil.constantComparison(CompareOperator.GREATER_OR_EQUAL,pk2Expression, 8),
+                                            TestUtil.constantComparison(CompareOperator.LESS,pk2Expression, 9))
                                     )
                               ),
                      scan.getFilter());
@@ -2646,8 +3120,8 @@ public class WhereOptimizerTest extends BaseConnectionlessQueryTest {
                 assertEquals(
                       TestUtil.rowKeyFilter(
                             TestUtil.or(
-                                    TestUtil.constantComparison(CompareOp.LESS_OR_EQUAL,pk2Expression, 7),
-                                    TestUtil.constantComparison(CompareOp.GREATER,pk2Expression, 9))),
+                                    TestUtil.constantComparison(CompareOperator.LESS_OR_EQUAL,pk2Expression, 7),
+                                    TestUtil.constantComparison(CompareOperator.GREATER,pk2Expression, 9))),
                      scan.getFilter());
             assertArrayEquals(scan.getStartRow(), HConstants.EMPTY_START_ROW);
             assertArrayEquals(scan.getStopRow(), HConstants.EMPTY_END_ROW);
@@ -2735,8 +3209,8 @@ public class WhereOptimizerTest extends BaseConnectionlessQueryTest {
             assertTrue(filterList.getFilters().get(0) instanceof SkipScanFilter);
             assertTrue(filterList.getFilters().get(1) instanceof RowKeyComparisonFilter);
             RowKeyComparisonFilter rowKeyComparisonFilter =(RowKeyComparisonFilter) filterList.getFilters().get(1);
-            assertTrue(rowKeyComparisonFilter.toString().equals(
-                    "(OBJECT_ID, OBJECT_VERSION) IN ([111,98,106,49,0,205,205,205,205],[111,98,106,50,0,206,206,206,206],[111,98,106,51,0,206,206,206,206])"));
+            assertEquals(rowKeyComparisonFilter.toString(),
+                    "(OBJECT_ID, OBJECT_VERSION) IN (X'6f626a3100cdcdcdcd',X'6f626a3200cececece',X'6f626a3300cececece')");
 
             assertTrue(queryPlan.getContext().getScanRanges().isPointLookup());
             assertArrayEquals(startKey, scan.getStartRow());
@@ -2780,8 +3254,8 @@ public class WhereOptimizerTest extends BaseConnectionlessQueryTest {
             scan = queryPlan.getContext().getScan();
             assertTrue(scan.getFilter() instanceof RowKeyComparisonFilter);
             rowKeyComparisonFilter = (RowKeyComparisonFilter)scan.getFilter();
-            assertTrue(rowKeyComparisonFilter.toString().equals(
-                    "((PK1, PK2) IN ([128,0,0,2,128,0,0,3],[128,0,0,2,128,0,0,4]) AND PK3 = 5)"));
+            assertEquals(rowKeyComparisonFilter.toString(),
+                    "((PK1, PK2) IN (X'8000000280000003',X'8000000280000004') AND PK3 = 5)");
             assertArrayEquals(
                     scan.getStartRow(),
                     ByteUtil.concat(
@@ -2961,9 +3435,8 @@ public class WhereOptimizerTest extends BaseConnectionlessQueryTest {
 
             assertTrue(filterList.getFilters().get(1) instanceof RowKeyComparisonFilter);
             rowKeyComparisonFilter =(RowKeyComparisonFilter) filterList.getFilters().get(1);
-            assertTrue(rowKeyComparisonFilter.toString().equals(
-                    "((PK3, PK4) IN ([127,255,255,251,128,0,0,5],[127,255,255,252,128,0,0,4])"+
-                    " AND (PK5, PK6, PK7) IN ([128,0,0,5,127,255,255,249,128,0,0,7],[128,0,0,6,127,255,255,248,128,0,0,8]))"));
+            assertEquals(rowKeyComparisonFilter.toString(),
+                    "((PK3, PK4) IN (X'7ffffffb80000005',X'7ffffffc80000004') AND (PK5, PK6, PK7) IN (X'800000057ffffff980000007',X'800000067ffffff880000008'))");
             /**
              * RVC is not singleKey
              */
@@ -3035,4 +3508,268 @@ public class WhereOptimizerTest extends BaseConnectionlessQueryTest {
                             "(TO_INTEGER(PK3), PK4) < (TO_INTEGER(TO_INTEGER(3)), 4))"));
         }
     }
+
+
+    @Test
+    public void testWithLargeORs() throws Exception {
+
+        SortOrder[][] sortOrders = new SortOrder[][] {
+                {SortOrder.ASC, SortOrder.ASC, SortOrder.ASC},
+                {SortOrder.ASC, SortOrder.ASC, SortOrder.DESC},
+                {SortOrder.ASC, SortOrder.DESC, SortOrder.ASC},
+                {SortOrder.ASC, SortOrder.DESC, SortOrder.DESC},
+                {SortOrder.DESC, SortOrder.ASC, SortOrder.ASC},
+                {SortOrder.DESC, SortOrder.ASC, SortOrder.DESC},
+                {SortOrder.DESC, SortOrder.DESC, SortOrder.ASC},
+                {SortOrder.DESC, SortOrder.DESC, SortOrder.DESC}
+        };
+
+        String tableName = generateUniqueName();
+        String viewName = String.format("Z_%s", tableName);
+        PDataType[] testTSVarVarPKTypes = new PDataType[] { PTimestamp.INSTANCE, PVarchar.INSTANCE, PInteger.INSTANCE};
+        String baseTableName = String.format("TEST_ENTITY.%s", tableName);
+        int tenantId = 1;
+        int numTestCases = 1;
+        for (int index=0;index<sortOrders.length;index++) {
+            // Test Case 1: PK1 = Timestamp, PK2 = Varchar, PK3 = Integer
+            String view1Name = String.format("TEST_ENTITY.%s%d",
+                    viewName, index*numTestCases+1);
+            String partition1 = String.format("Z%d", index*numTestCases+1);
+            createTenantView(tenantId,
+                    baseTableName, view1Name, partition1,
+                    testTSVarVarPKTypes[0], sortOrders[index][0],
+                    testTSVarVarPKTypes[1], sortOrders[index][1],
+                    testTSVarVarPKTypes[2], sortOrders[index][2]);
+            testTSVarIntAndLargeORs(tenantId, view1Name, sortOrders[index]);
+        }
+    }
+
+    /**
+     * Test that tenantId is present in the scan start row key when using an inherited index on a tenant view.
+     */
+    @Test
+    public void testScanKeyInheritedIndexTenantView() throws Exception {
+        String baseTableName =  generateUniqueName();
+        String globalViewName = generateUniqueName();
+        String globalViewIndexName =  generateUniqueName();
+        String tenantViewName =  generateUniqueName();
+        try (Connection conn = DriverManager.getConnection(getUrl())) {
+            // create table, view and view index
+            conn.createStatement().execute("CREATE TABLE " + baseTableName +
+                    " (TENANT_ID CHAR(8) NOT NULL, KP CHAR(3) NOT NULL, PK CHAR(3) NOT NULL, KV CHAR(2), KV2 CHAR(2) " +
+                    "CONSTRAINT PK PRIMARY KEY(TENANT_ID, KP, PK)) MULTI_TENANT=true");
+            conn.createStatement().execute("CREATE VIEW " + globalViewName +
+                    " AS SELECT * FROM " + baseTableName + " WHERE  KP = '001'");
+            conn.createStatement().execute("CREATE INDEX " + globalViewIndexName + " on " +
+                    globalViewName + " (KV) " + " INCLUDE (KV2)");
+            //create tenant view
+            String tenantId = "tenantId";
+            Properties tenantProps = new Properties();
+            tenantProps.setProperty(PhoenixRuntime.TENANT_ID_ATTRIB, tenantId);
+            try (Connection tenantConn = DriverManager.getConnection(getUrl(), tenantProps)) {
+                tenantConn.createStatement().execute("CREATE VIEW " + tenantViewName + " AS SELECT * FROM " + globalViewName);
+                // query on secondary key
+                String query = "SELECT KV2 FROM  " + tenantViewName + " WHERE KV = 'KV'";
+                PhoenixConnection pconn = tenantConn.unwrap(PhoenixConnection.class);
+                PhoenixPreparedStatement pstmt = new PhoenixPreparedStatement(pconn, query);
+                QueryPlan plan = pstmt.compileQuery();
+                plan = tenantConn.unwrap(PhoenixConnection.class).getQueryServices().getOptimizer().optimize(pstmt, plan);
+                // optimized query plan should use inherited index
+                assertEquals(tenantViewName + "#" + globalViewIndexName, plan.getContext().getCurrentTable().getTable().getName().getString());
+                Scan scan = plan.getContext().getScan();
+                PTable viewIndexPTable = tenantConn.unwrap(PhoenixConnection.class).getTable(globalViewIndexName);
+                // PK of view index [_INDEX_ID, tenant_id, KV, PK]
+                byte[] startRow = ByteUtil.concat(PLong.INSTANCE.toBytes(viewIndexPTable.getViewIndexId()),
+                                                    PChar.INSTANCE.toBytes(tenantId),
+                                                    PChar.INSTANCE.toBytes("KV"));
+                assertArrayEquals(startRow, scan.getStartRow());
+            }
+        }
+    }
+
+    private void createBaseTable(String baseTable) throws SQLException {
+
+        try (Connection globalConnection = DriverManager.getConnection(getUrl())) {
+            try (Statement cstmt = globalConnection.createStatement()) {
+                String CO_BASE_TBL_TEMPLATE = "CREATE TABLE IF NOT EXISTS %s(OID CHAR(15) NOT NULL,KP CHAR(3) NOT NULL,ROW_ID VARCHAR, COL1 VARCHAR,COL2 VARCHAR,COL3 VARCHAR,CREATED_DATE DATE,CREATED_BY CHAR(15),LAST_UPDATE DATE,LAST_UPDATE_BY CHAR(15),SYSTEM_MODSTAMP DATE CONSTRAINT pk PRIMARY KEY (OID,KP)) MULTI_TENANT=true,COLUMN_ENCODED_BYTES=0";
+                cstmt.execute(String.format(CO_BASE_TBL_TEMPLATE, baseTable));
+            }
+        }
+        return;
+    }
+
+    private void createTenantView(int tenant, String baseTable, String tenantView, String partition,
+                                  PDataType pkType1, SortOrder pk1Order,
+                                  PDataType pkType2, SortOrder pk2Order,
+                                  PDataType pkType3, SortOrder pk3Order) throws SQLException {
+
+        String pkType1Str = getType(pkType1);
+        String pkType2Str = getType(pkType2);
+        String pkType3Str = getType(pkType3);
+        createBaseTable(baseTable);
+
+        String tenantConnectionUrl = String.format("%s;%s=%s%06d", getUrl(), TENANT_ID_ATTRIB, TENANT_PREFIX, tenant);
+        try (Connection tenantConnection = DriverManager.getConnection(tenantConnectionUrl)) {
+            try (Statement cstmt = tenantConnection.createStatement()) {
+                String TENANT_VIEW_TEMPLATE = "CREATE VIEW IF NOT EXISTS %s(ID1 %s not null,ID2 %s not null,ID3 %s not null,COL4 VARCHAR,COL5 VARCHAR,COL6 VARCHAR CONSTRAINT pk PRIMARY KEY (ID1 %s, ID2 %s, ID3 %s)) "
+                        + "AS SELECT * FROM %s WHERE KP = '%s'";
+                cstmt.execute(String.format(TENANT_VIEW_TEMPLATE, tenantView, pkType1Str, pkType2Str, pkType3Str, pk1Order.name(),pk2Order.name(),pk3Order.name(), baseTable, partition));
+            }
+        }
+        return;
+    }
+
+    private int setBindVariables(PhoenixPreparedStatement stmt, int startBindIndex, int numBinds, PDataType[] testPKTypes)
+            throws SQLException {
+
+        Random rnd = new Random();
+        int lastBindCol = 0;
+        int numCols = testPKTypes.length;
+        for (int i = 0; i<numBinds; i++) {
+            for (int b=0;b<testPKTypes.length;b++) {
+                int colIndex = startBindIndex + i*numCols+b+1;
+                switch (testPKTypes[b].getSqlType()) {
+                    case Types.VARCHAR: {
+                        // pkTypeStr = "VARCHAR(25)";
+                        stmt.setString(colIndex, RandomStringUtils.randomAlphanumeric(25));
+                        break;
+                    }
+                    case Types.CHAR: {
+                        //pkTypeStr = "CHAR(15)";
+                        stmt.setString(colIndex, RandomStringUtils.randomAlphanumeric(15));
+                        break;
+                    }
+                    case Types.DECIMAL:
+                        //pkTypeStr = "DECIMAL(8,2)";
+                        stmt.setDouble(colIndex, rnd.nextDouble());
+                        break;
+                    case Types.INTEGER:
+                        //pkTypeStr = "INTEGER";
+                        stmt.setInt(colIndex, rnd.nextInt(50000));
+                        break;
+                    case Types.BIGINT:
+                        //pkTypeStr = "BIGINT";
+                        stmt.setLong(colIndex, System.currentTimeMillis() + rnd.nextInt(50000));
+                        break;
+                    case Types.DATE:
+                        //pkTypeStr = "DATE";
+                        stmt.setDate(colIndex, new Date(System.currentTimeMillis() + rnd.nextInt(50000)));
+                        break;
+                    case Types.TIMESTAMP:
+                        //pkTypeStr = "TIMESTAMP";
+                        stmt.setTimestamp(colIndex, new Timestamp(System.currentTimeMillis() + rnd.nextInt(50000)));
+                        break;
+                    default:
+                        // pkTypeStr = "VARCHAR(25)";
+                        stmt.setString(colIndex, RandomStringUtils.randomAlphanumeric(25));
+                }
+                lastBindCol = colIndex;
+            }
+        }
+        return lastBindCol;
+    }
+
+    private String getType(PDataType pkType) {
+        String pkTypeStr = "VARCHAR(25)";
+        switch (pkType.getSqlType()) {
+            case Types.VARCHAR:
+                pkTypeStr = "VARCHAR(25)";
+                break;
+            case Types.CHAR:
+                pkTypeStr = "CHAR(15)";
+                break;
+            case Types.DECIMAL:
+                pkTypeStr = "DECIMAL(8,2)";
+                break;
+            case Types.INTEGER:
+                pkTypeStr = "INTEGER";
+                break;
+            case Types.BIGINT:
+                pkTypeStr = "BIGINT";
+                break;
+            case Types.DATE:
+                pkTypeStr = "DATE";
+                break;
+            case Types.TIMESTAMP:
+                pkTypeStr = "TIMESTAMP";
+                break;
+            default:
+                pkTypeStr = "VARCHAR(25)";
+        }
+        return pkTypeStr;
+    }
+    // Test Case 1: PK1 = Timestamp, PK2 = Varchar, PK3 = Integer
+    private void testTSVarIntAndLargeORs(int tenantId, String viewName, SortOrder[] sortOrder) throws SQLException {
+        String testName = "testLargeORs";
+        String testLargeORs = String.format("SELECT ROW_ID FROM %s ", viewName);
+        PDataType[] testPKTypes = new PDataType[] { PTimestamp.INSTANCE, PVarchar.INSTANCE, PInteger.INSTANCE};
+        assertExpectedWithMaxInListAndLargeORs(tenantId, testName, testPKTypes, testLargeORs, sortOrder);
+
+    }
+
+    public void assertExpectedWithMaxInListAndLargeORs(int tenantId,  String testType, PDataType[] testPKTypes, String testSQL, SortOrder[] sortOrder) throws SQLException {
+
+        Properties tenantProps = PropertiesUtil.deepCopy(TEST_PROPERTIES);
+        int numINs = 25;
+        int expectedExtractedNodes = Arrays.asList(new SortOrder[] {sortOrder[0], sortOrder[1]}).stream().allMatch(Predicate.isEqual(SortOrder.ASC)) ? 3 : 2;
+
+        // Test for increasing orders of ORs (5,50,500,5000)
+        for (int o = 0; o < 4;o++) {
+            int numORs = (int) (5.0 * Math.pow(10.0,(double) o));
+            String context = "ORs:" + numORs + ", sql: " + testSQL + ", type: " + testType + ", sort-order: " + Arrays.stream(sortOrder).map(s -> s.name()).collect(Collectors.joining(","));
+            String tenantConnectionUrl = String.format("%s;%s=%s%06d", getUrl(), TENANT_ID_ATTRIB, TENANT_PREFIX, tenantId);
+            try (Connection tenantConnection = DriverManager.getConnection(tenantConnectionUrl, tenantProps)) {
+                // Generate the where clause
+                StringBuilder whereClause = new StringBuilder("(ID1,ID2) IN ((?,?)");
+                for (int i = 0; i < numINs; i++) {
+                    whereClause.append(",(?,?)");
+                }
+                whereClause.append(") AND (ID3 = ? ");
+                for (int i = 0; i < numORs; i++) {
+                    whereClause.append(" OR ID3 = ?");
+                }
+                whereClause.append(") LIMIT 200");
+                // Full SQL
+                String query = testSQL + " WHERE " + whereClause;
+
+                PhoenixPreparedStatement stmtForExtractNodesCheck =
+                        tenantConnection.prepareStatement(query).unwrap(PhoenixPreparedStatement.class);
+                int lastBoundCol = 0;
+                lastBoundCol = setBindVariables(stmtForExtractNodesCheck, lastBoundCol,
+                        numINs + 1,
+                        new PDataType[] {testPKTypes[0], testPKTypes[1]});
+                lastBoundCol = setBindVariables(stmtForExtractNodesCheck, lastBoundCol,
+                        numORs + 1,  new PDataType[] {testPKTypes[2]});
+
+                // Get the column resolver
+                SelectStatement selectStatement = new SQLParser(query).parseQuery();
+                ColumnResolver resolver = FromCompiler.getResolverForQuery(selectStatement,
+                        tenantConnection.unwrap(PhoenixConnection.class));
+
+                // Where clause with INs and ORs
+                ParseNode whereNode = selectStatement.getWhere();
+                Expression whereExpression = whereNode.accept(new TestWhereExpressionCompiler(
+                        new StatementContext(stmtForExtractNodesCheck, resolver)));
+
+                // Tenant view where clause
+                ParseNode viewWhere = SQLParser.parseCondition("KP = 'ECZ'");
+                Expression viewWhereExpression = viewWhere.accept(new TestWhereExpressionCompiler(
+                        new StatementContext(stmtForExtractNodesCheck, resolver)));
+
+                // Build the test expression
+                Expression testExpression = AndExpression.create(
+                        Lists.newArrayList(whereExpression, viewWhereExpression));
+
+                // Test
+                Set<Expression> extractedNodes = Sets.<Expression>newHashSet();
+                WhereOptimizer.pushKeyExpressionsToScan(new StatementContext(stmtForExtractNodesCheck, resolver),
+                        Collections.emptySet(), testExpression, extractedNodes, Optional.<byte[]>absent());
+                assertEquals(String.format("Unexpected results expected = %d, actual = %d extracted nodes",
+                                expectedExtractedNodes, extractedNodes.size()),
+                        expectedExtractedNodes, extractedNodes.size());
+            }
+
+        }
+    }
+
 }

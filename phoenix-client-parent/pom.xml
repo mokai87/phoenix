@@ -22,7 +22,7 @@
   <parent>
     <groupId>org.apache.phoenix</groupId>
     <artifactId>phoenix</artifactId>
-    <version>5.2.0-SNAPSHOT</version>
+    <version>5.3.0-SNAPSHOT</version>
   </parent>
   <artifactId>phoenix-client-parent</artifactId>
   <name>Phoenix Client Parent</name>
@@ -34,8 +34,6 @@
     <!-- Don't make a source-jar -->
     <source.skip>true</source.skip>
     <license.bundles.dependencies>true</license.bundles.dependencies>
-    <shaded.package>org.apache.phoenix.shaded</shaded.package>
-
   </properties>
 
   <build>
@@ -78,6 +76,7 @@
               <filter>
                 <artifact>*:*</artifact>
                 <excludes>
+                  <exclude>META-INF/maven/**</exclude>
                   <exclude>META-INF/*.SF</exclude>
                   <exclude>META-INF/*.DSA</exclude>
                   <exclude>META-INF/*.RSA</exclude>
@@ -223,6 +222,14 @@
               <relocation>
                 <pattern>javax/validation/</pattern>
                 <shadedPattern>${shaded.package}.javax.validation.</shadedPattern>
+              </relocation>
+              <relocation>
+                <pattern>javax/xml/bind/</pattern>
+                <shadedPattern>${shaded.package}.javax.xml.bind.</shadedPattern>
+              </relocation>
+              <relocation>
+                <pattern>javax/activation/</pattern>
+                <shadedPattern>${shaded.package}.javax.activation.</shadedPattern>
               </relocation>
               <relocation>
                 <pattern>net/</pattern>

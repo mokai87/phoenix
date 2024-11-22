@@ -17,6 +17,7 @@
  */
 package org.apache.phoenix.compile;
 
+import static org.apache.phoenix.compile.WhereCompiler.transformDNF;
 import static org.apache.phoenix.schema.PTable.QualifierEncodingScheme.TWO_BYTE_QUALIFIERS;
 import static org.apache.phoenix.util.TestUtil.ATABLE_NAME;
 import static org.apache.phoenix.util.TestUtil.TEST_PROPERTIES;
@@ -43,14 +44,15 @@ import java.sql.Date;
 import java.sql.DriverManager;
 import java.sql.SQLException;
 import java.util.Arrays;
+import java.util.Base64;
 import java.util.Collections;
 import java.util.List;
 
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.hbase.CompareOperator;
 import org.apache.hadoop.hbase.HBaseConfiguration;
 import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.client.Scan;
-import org.apache.hadoop.hbase.filter.CompareFilter.CompareOp;
 import org.apache.hadoop.hbase.filter.Filter;
 import org.apache.hadoop.hbase.filter.FilterList;
 import org.apache.hadoop.hbase.util.Bytes;
@@ -63,6 +65,7 @@ import org.apache.phoenix.filter.RowKeyComparisonFilter;
 import org.apache.phoenix.filter.SkipScanFilter;
 import org.apache.phoenix.jdbc.PhoenixConnection;
 import org.apache.phoenix.jdbc.PhoenixPreparedStatement;
+import org.apache.phoenix.parse.ParseNode;
 import org.apache.phoenix.query.BaseConnectionlessQueryTest;
 import org.apache.phoenix.query.KeyRange;
 import org.apache.phoenix.query.QueryConstants;
@@ -83,6 +86,7 @@ import org.apache.phoenix.util.PropertiesUtil;
 import org.apache.phoenix.util.SchemaUtil;
 import org.apache.phoenix.util.StringUtil;
 import org.apache.phoenix.util.TestUtil;
+import org.junit.Assert;
 import org.junit.Ignore;
 import org.junit.Test;
 
@@ -108,7 +112,7 @@ public class WhereCompilerTest extends BaseConnectionlessQueryTest {
         Filter filter = scan.getFilter();
         assertEquals(
             singleKVFilter(constantComparison(
-                CompareOp.EQUAL,
+                CompareOperator.EQUAL,
                 A_INTEGER,
                 0)),
             filter);
@@ -136,11 +140,11 @@ public class WhereCompilerTest extends BaseConnectionlessQueryTest {
                     ImmutableList.of(Arrays.asList(
                         pointRange("i1"),
                         pointRange("i2"))),
-                    SchemaUtil.VAR_BINARY_SCHEMA),
+                    SchemaUtil.VAR_BINARY_SCHEMA, false),
                 singleKVFilter(
-                        or(constantComparison(CompareOp.EQUAL,id,"i1"),
-                           and(constantComparison(CompareOp.EQUAL,id,"i2"),
-                               constantComparison(CompareOp.EQUAL,company,"c3"))))),
+                        or(constantComparison(CompareOperator.EQUAL,id,"i1"),
+                           and(constantComparison(CompareOperator.EQUAL,id,"i2"),
+                               constantComparison(CompareOperator.EQUAL,company,"c3"))))),
             filterList.getFilters());
     }
 
@@ -156,9 +160,9 @@ public class WhereCompilerTest extends BaseConnectionlessQueryTest {
         PColumn column = plan.getTableRef().getTable().getColumnForColumnName("COMPANY");
         assertEquals(
                 singleKVFilter(constantComparison(
-                    CompareOp.EQUAL,
-                    new KeyValueColumnExpression(column),
-                    "c3")),
+                        CompareOperator.EQUAL,
+                        new KeyValueColumnExpression(column),
+                        "c3")),
                 filter);
     }
 
@@ -267,11 +271,11 @@ public class WhereCompilerTest extends BaseConnectionlessQueryTest {
         Scan scan = plan.getContext().getScan();
         Filter filter = scan.getFilter();
         assertEquals(
-            multiEncodedKVFilter(columnComparison(
-                CompareOp.EQUAL,
-                A_STRING,
-                B_STRING), TWO_BYTE_QUALIFIERS),
-            filter);
+                multiEncodedKVFilter(columnComparison(
+                        CompareOperator.EQUAL,
+                        A_STRING,
+                        B_STRING), TWO_BYTE_QUALIFIERS),
+                filter);
     }
 
     @Test
@@ -302,16 +306,16 @@ public class WhereCompilerTest extends BaseConnectionlessQueryTest {
         Filter filter = scan.getFilter();
 
         assertEquals(
-            multiEncodedKVFilter(and(
-                constantComparison(
-                    CompareOp.EQUAL,
-                    A_INTEGER,
-                    0),
-                constantComparison(
-                    CompareOp.EQUAL,
-                    A_STRING,
-                    "foo")), TWO_BYTE_QUALIFIERS),
-            filter);
+                multiEncodedKVFilter(and(
+                        constantComparison(
+                                CompareOperator.EQUAL,
+                                A_INTEGER,
+                                0),
+                        constantComparison(
+                                CompareOperator.EQUAL,
+                                A_STRING,
+                                "foo")), TWO_BYTE_QUALIFIERS),
+                filter);
     }
 
     @Test
@@ -325,11 +329,11 @@ public class WhereCompilerTest extends BaseConnectionlessQueryTest {
 
         Filter filter = scan.getFilter();
         assertEquals(
-            singleKVFilter(constantComparison(
-                CompareOp.LESS_OR_EQUAL,
-                A_INTEGER,
-                0)),
-            filter);
+                singleKVFilter(constantComparison(
+                        CompareOperator.LESS_OR_EQUAL,
+                        A_INTEGER,
+                        0)),
+                filter);
     }
 
     @Test
@@ -347,7 +351,7 @@ public class WhereCompilerTest extends BaseConnectionlessQueryTest {
 
         assertEquals(
             singleKVFilter(constantComparison(
-                CompareOp.GREATER_OR_EQUAL,
+                    CompareOperator.GREATER_OR_EQUAL,
                 A_DATE,
                 date)),
             filter);
@@ -364,7 +368,7 @@ public class WhereCompilerTest extends BaseConnectionlessQueryTest {
 
         assertEquals(
             singleKVFilter(constantComparison(
-                CompareOp.GREATER_OR_EQUAL,
+                    CompareOperator.GREATER_OR_EQUAL,
                 X_DECIMAL,
                 expectedDecimal)),
             filter);
@@ -422,7 +426,7 @@ public class WhereCompilerTest extends BaseConnectionlessQueryTest {
 
         assertEquals(
             new RowKeyComparisonFilter(
-                constantComparison(CompareOp.EQUAL,
+                constantComparison(CompareOperator.EQUAL,
                     new SubstrFunction(
                         Arrays.<Expression>asList(
                             new RowKeyColumnExpression(ENTITY_ID,new RowKeyValueAccessor(ATABLE.getPKColumns(),1)),
@@ -510,7 +514,7 @@ public class WhereCompilerTest extends BaseConnectionlessQueryTest {
             singleKVFilter( // single b/c one column is a row key column
             or(
                 constantComparison(
-                    CompareOp.EQUAL,
+                    CompareOperator.EQUAL,
                     new SubstrFunction(Arrays.<Expression> asList(
                         new RowKeyColumnExpression(
                             ENTITY_ID,
@@ -519,7 +523,7 @@ public class WhereCompilerTest extends BaseConnectionlessQueryTest {
                         LiteralExpression.newConstant(3))),
                     keyPrefix),
                 constantComparison(
-                    CompareOp.EQUAL,
+                    CompareOperator.EQUAL,
                     A_INTEGER,
                     aInt))),
             filter);
@@ -586,7 +590,7 @@ public class WhereCompilerTest extends BaseConnectionlessQueryTest {
         Filter filter = scan.getFilter();
         assertEquals(
             singleKVFilter(constantComparison(
-                CompareOp.EQUAL,
+                CompareOperator.EQUAL,
                 A_INTEGER,
                 0)),
             filter);
@@ -608,7 +612,7 @@ public class WhereCompilerTest extends BaseConnectionlessQueryTest {
         Filter filter = scan.getFilter();
         assertEquals(
             singleKVFilter(constantComparison(
-                CompareOp.EQUAL,
+                CompareOperator.EQUAL,
                 A_INTEGER,
                 0)),
             filter);
@@ -679,7 +683,7 @@ public class WhereCompilerTest extends BaseConnectionlessQueryTest {
                     pointRange(tenantId1),
                     pointRange(tenantId2),
                     pointRange(tenantId3))),
-                plan.getTableRef().getTable().getRowKeySchema()),
+                plan.getTableRef().getTable().getRowKeySchema(), false),
             filter);
     }
 
@@ -702,7 +706,7 @@ public class WhereCompilerTest extends BaseConnectionlessQueryTest {
                     pointRange(tenantId1),
                     pointRange(tenantId2),
                     pointRange(tenantId3))),
-                plan.getTableRef().getTable().getRowKeySchema()),
+                plan.getTableRef().getTable().getRowKeySchema(), false),
             filter);
 
         byte[] startRow = PVarchar.INSTANCE.toBytes(tenantId1);
@@ -735,7 +739,7 @@ public class WhereCompilerTest extends BaseConnectionlessQueryTest {
                     Arrays.asList(
                         pointRange(tenantId,entityId1),
                         pointRange(tenantId,entityId2))),
-                SchemaUtil.VAR_BINARY_SCHEMA),
+                SchemaUtil.VAR_BINARY_SCHEMA, false),
             filter);
     }
 
@@ -764,8 +768,8 @@ public class WhereCompilerTest extends BaseConnectionlessQueryTest {
                         Bytes.toBytes(entityId1),
                         true,
                         Bytes.toBytes(entityId2),
-                        true))),
-                plan.getTableRef().getTable().getRowKeySchema()),
+                        true, SortOrder.ASC))),
+                plan.getTableRef().getTable().getRowKeySchema(), false),
             filter);
     }
 
@@ -789,7 +793,7 @@ public class WhereCompilerTest extends BaseConnectionlessQueryTest {
                         pointRange(tenantId1, entityId),
                         pointRange(tenantId2, entityId),
                         pointRange(tenantId3, entityId))),
-                SchemaUtil.VAR_BINARY_SCHEMA),
+                SchemaUtil.VAR_BINARY_SCHEMA, false),
             filter);
     }
     @Test
@@ -843,7 +847,7 @@ public class WhereCompilerTest extends BaseConnectionlessQueryTest {
                         pointRange(tenantId1, entityId2),
                         pointRange(tenantId2, entityId1),
                         pointRange(tenantId2, entityId2))),
-                SchemaUtil.VAR_BINARY_SCHEMA),
+                SchemaUtil.VAR_BINARY_SCHEMA, false),
             filter);
     }
 
@@ -898,11 +902,11 @@ public class WhereCompilerTest extends BaseConnectionlessQueryTest {
         assertEquals(
                 singleKVFilter(and(
                     constantComparison(
-                        CompareOp.GREATER_OR_EQUAL,
+                        CompareOperator.GREATER_OR_EQUAL,
                         A_INTEGER,
                         0),
                     constantComparison(
-                        CompareOp.LESS_OR_EQUAL,
+                        CompareOperator.LESS_OR_EQUAL,
                         A_INTEGER,
                         10))),
                 filter);
@@ -920,11 +924,11 @@ public class WhereCompilerTest extends BaseConnectionlessQueryTest {
         assertEquals(
                 singleKVFilter(not(and(
                     constantComparison(
-                        CompareOp.GREATER_OR_EQUAL,
+                        CompareOperator.GREATER_OR_EQUAL,
                         A_INTEGER,
                         0),
                     constantComparison(
-                        CompareOp.LESS_OR_EQUAL,
+                        CompareOperator.LESS_OR_EQUAL,
                         A_INTEGER,
                         10)))).toString(),
                 filter.toString());
@@ -951,11 +955,11 @@ public class WhereCompilerTest extends BaseConnectionlessQueryTest {
         assertEquals(
             multiEncodedKVFilter(and(
                 constantComparison(
-                    CompareOp.EQUAL,
+                    CompareOperator.EQUAL,
                     aInteger,
                     0),
                 constantComparison(
-                    CompareOp.EQUAL,
+                    CompareOperator.EQUAL,
                     aString,
                     "foo")), TWO_BYTE_QUALIFIERS),
             filter);
@@ -985,11 +989,11 @@ public class WhereCompilerTest extends BaseConnectionlessQueryTest {
         assertEquals(
             multiEncodedKVFilter(and(
                 constantComparison(
-                    CompareOp.EQUAL,
+                    CompareOperator.EQUAL,
                     aInteger,
                     0),
                 constantComparison(
-                    CompareOp.EQUAL,
+                    CompareOperator.EQUAL,
                     aString,
                     "foo")), TWO_BYTE_QUALIFIERS),
             filter);
@@ -1026,4 +1030,136 @@ public class WhereCompilerTest extends BaseConnectionlessQueryTest {
         assertEquals(FETCH_SIZE, pstmt.getFetchSize());
         assertEquals(FETCH_SIZE, scan.getCaching());
     }
+    private Expression getDNF(PhoenixConnection pconn, String query) throws SQLException {
+        //SQLParser parser = new SQLParser("where ID = 'i1' or (ID = 'i2' and A > 1)");
+        //        ParseNode where = parser.parseWhereClause()
+        PhoenixPreparedStatement pstmt = newPreparedStatement(pconn, query);
+        QueryPlan plan = pstmt.compileQuery();
+        ParseNode where = plan.getStatement().getWhere();
+
+        return transformDNF(where, plan.getContext());
+    }
+
+    @Test
+    public void testWhereInclusion() throws SQLException {
+        PhoenixConnection pconn = DriverManager.getConnection(getUrl(),
+                PropertiesUtil.deepCopy(TEST_PROPERTIES)).unwrap(PhoenixConnection.class);
+        String ddl = "create table myTable(ID varchar primary key, A integer, B varchar, " +
+                "C date, D double, E integer, F json, G varbinary, H varbinary_encoded)";
+        pconn.createStatement().execute(ddl);
+        ddl = "create table myTableDesc(ID varchar primary key DESC, A integer, B varchar, " +
+                "C date, D double, E integer, F json, G varbinary, H varbinary_encoded)";
+        pconn.createStatement().execute(ddl);
+
+        final int NUM = 25;
+        String[] containingQueries = new String[NUM];
+        String[] containedQueries = new String[NUM];
+
+        containingQueries[0] = "select * from myTable where ID = 'i1' or (ID = 'i2' and A > 1)";
+        containedQueries[0] = "select * from myTableDesc where ID = 'i1' or (ID = 'i2' and " +
+                "A > 2 + 2)";
+
+        containingQueries[1] = "select * from myTable where ID > 'i3' and A > 1";
+        containedQueries[1] = "select * from myTableDesc where (ID > 'i7' or ID = 'i4') and " +
+                "A > 2 * 10";
+
+        containingQueries[2] = "select * from myTable where ID IN ('i3', 'i7', 'i1') and A < 10";
+        containedQueries[2] = "select * from myTableDesc where ID IN ('i1', 'i7') and A < 10 / 2";
+
+        containingQueries[3] = "select * from myTableDesc where (ID, B) > ('i3', 'a') and A >= 10";
+        containedQueries[3] = "select * from myTable where ID = 'i3' and B = 'c' and A = 10";
+
+        containingQueries[4] = "select * from myTable where ID >= 'i3' and A between 5 and 15";
+        containedQueries[4] = "select * from myTableDesc where ID = 'i3' and A between 5 and 10";
+
+        containingQueries[5] = "select * from myTable where (A between 5 and 15) and " +
+                "(D < 10.67 or C <= CURRENT_DATE())";
+        containedQueries[5] = "select * from myTable where (A = 5 and D between 1.5 and 9.99) or " +
+                "(A = 6 and C <= CURRENT_DATE() - 1000)";
+
+        containingQueries[6] = "select * from myTable where A is not null";
+        containedQueries[6] = "select * from myTable where A > 0";
+
+        containingQueries[7] = "select * from myTable where NOT (B is null)";
+        containedQueries[7] = "select * from myTable where (B > 'abc')";
+
+        containingQueries[8] = "select * from myTable where A >= E and D <= A";
+        containedQueries[8] = "select * from myTable where (A > E and D = A)";
+
+        containingQueries[9] = "select * from myTable where A > E";
+        containedQueries[9] = "select * from myTable where (A > E  and B is not null)";
+
+        containingQueries[10] = "select * from myTable where B like '%abc'";
+        containedQueries[10] = "select * from myTable where (B like '%abc' and ID > 'i1')";
+
+        containingQueries[11] = "select * from myTable where " +
+                "PHOENIX_ROW_TIMESTAMP() < CURRENT_TIME()";
+        containedQueries[11] = "select * from myTable where " +
+                "(PHOENIX_ROW_TIMESTAMP() < CURRENT_TIME() - 1)";
+
+        containingQueries[12] = "select * from myTable where (A, E) IN ((2,3), (7,8), (10,11))";
+        containedQueries[12] = "select * from myTable where (A, E) IN ((2,3), (7,8))";
+
+        containingQueries[13] = "select * from myTable where ID > 'i3' and ID < 'i5'";
+        containedQueries[13] = "select * from myTable where (ID = 'i4') ";
+
+        containingQueries[14] = "select * from myTable where " +
+                "CURRENT_DATE() - PHOENIX_ROW_TIMESTAMP() < 10";
+        containedQueries[14] = "select * from myTable where " +
+                " CURRENT_DATE() - PHOENIX_ROW_TIMESTAMP() < 5 ";
+
+        containingQueries[15] = "select * from myTable where ID > 'i3' and A > 1 and JSON_VALUE(F, '$.type') > 'i3'";
+        containedQueries[15] = "select * from myTableDesc where (ID > 'i7' or ID = 'i4') and " +
+                "A > 2 * 10 and (JSON_VALUE(F, '$.type') > 'i7' or JSON_VALUE(F, '$.type') = 'i4')";
+
+        containingQueries[16] = "select * from myTable where JSON_VALUE(F, '$.type') is not null";
+        containedQueries[16] = "select * from myTable where JSON_VALUE(F, '$.type') > 'i3'";
+
+        containingQueries[17] = "select * from myTable where JSON_VALUE(F, '$.type') like '%abc'";
+        containedQueries[17] = "select * from myTable where (JSON_VALUE(F, '$.type') like '%abc' and ID > 'i1')";
+
+        containingQueries[18] = "select * from myTable where JSON_EXISTS(F, '$.type')";
+        containedQueries[18] = "select * from myTable where JSON_EXISTS(F, '$.type') and JSON_VALUE(F, '$.type') > 'i3'";
+
+        containingQueries[19] = "select * from myTable where JSON_VALUE(F, '$.type') IN ('i3', 'i7', 'i1') and A < 10";
+        containedQueries[19] = "select * from myTableDesc where JSON_VALUE(F, '$.type') IN ('i1', 'i7') and A < 10 / 2";
+
+        String val1 = Base64.getEncoder().encodeToString(Bytes.toBytes("Hello"));
+        String val2 = Base64.getEncoder().encodeToString(Bytes.toBytes("Hello1"));
+        String val3 = Base64.getEncoder().encodeToString(Bytes.toBytes("Hello2"));
+        containingQueries[20] =
+            "select * from myTable where ID = 'i1' or (ID = 'i2' and G > '" + val1 + "')";
+        containedQueries[20] =
+            "select * from myTable where ID = 'i1' or (ID = 'i2' and G > '" + val2 + "')";
+
+        containingQueries[21] =
+            "select * from myTable where ID = 'i1' or (ID = 'i2' and H > '" + val1 + "')";
+        containedQueries[21] =
+            "select * from myTable where ID = 'i1' or (ID = 'i2' and H > '" + val2 + "')";
+
+        containingQueries[22] =
+            "select * from myTable where G > '" + val1 + "' and G < '" + val3 + "'";
+        containedQueries[22] = "select * from myTable where (G = '" + val2 + "') ";
+
+        containingQueries[23] =
+            "select * from myTable where H > '" + val1 + "' and H < '" + val3 + "'";
+        containedQueries[23] = "select * from myTable where (H = '" + val2 + "') ";
+
+        containingQueries[24] =
+            "select * from myTable where (G, H) IN (('" + val1 + "', '" + val2 + "'), ('" + val1
+                + "', '" + val3 + "'), ('" + val2 + "', '" + val3 + "'))";
+        containedQueries[24] =
+            "select * from myTable where (G, H) IN (('" + val1 + "', '" + val3 + "'), ('" + val2
+                + "', '" + val3 + "'))";
+
+        for (int i = 0; i < NUM; i++) {
+            Assert.assertTrue("Containing query: " + containingQueries[i] + " , Contained query: "
+                + containedQueries[i], WhereCompiler.contains(getDNF(pconn, containingQueries[i]),
+                getDNF(pconn, containedQueries[i])));
+            Assert.assertFalse("Containing query: " + containingQueries[i] + " , Contained query: "
+                + containedQueries[i], WhereCompiler.contains(getDNF(pconn, containedQueries[i]),
+                getDNF(pconn, containingQueries[i])));
+        }
+    }
+
 }

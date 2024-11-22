@@ -33,6 +33,7 @@ import org.apache.hadoop.hbase.util.Pair;
 import org.apache.phoenix.compile.ExplainPlan;
 import org.apache.phoenix.compile.ExplainPlanAttributes;
 import org.apache.phoenix.jdbc.PhoenixPreparedStatement;
+import org.apache.phoenix.schema.types.PVarbinary;
 import org.apache.phoenix.util.PhoenixRuntime;
 import org.apache.phoenix.util.SchemaUtil;
 
@@ -154,10 +155,12 @@ public abstract class BaseTenantSpecificViewIndexIT extends SplitSystemCatalogIT
             if (saltBuckets == null) {
                 iteratorTypeAndScanSize = "PARALLEL 1-WAY";
             } else {
-                iteratorTypeAndScanSize = "PARALLEL 3-WAY";
+                iteratorTypeAndScanSize = "PARALLEL " + saltBuckets + "-WAY";
             }
             clientSortAlgo = "CLIENT MERGE SORT";
-            expectedTableName = tableName;
+            expectedTableName =
+                    SchemaUtil.getTableName(SchemaUtil.getSchemaNameFromFullName(viewName),
+                            indexName) + "(" + tableName + ")";
             keyRanges = " [" + (1L + expectedIndexIdOffset) + ",'" + tenantId
                 + "','" + valuePrefix + "v2-1']";
         } else {
@@ -167,11 +170,12 @@ public abstract class BaseTenantSpecificViewIndexIT extends SplitSystemCatalogIT
                 keyRanges = " [" + (Short.MIN_VALUE + expectedIndexIdOffset)
                     + ",'" + tenantId + "','" + valuePrefix + "v2-1']";
             } else {
-                iteratorTypeAndScanSize = "PARALLEL 3-WAY";
+                iteratorTypeAndScanSize = "PARALLEL " + saltBuckets + "-WAY";
                 clientSortAlgo = "CLIENT MERGE SORT";
-                keyRanges = " [0," + (Short.MIN_VALUE + expectedIndexIdOffset)
+                keyRanges = " [X'00'," + (Short.MIN_VALUE + expectedIndexIdOffset)
                     + ",'" + tenantId + "','" + valuePrefix + "v2-1'] - ["
-                    + (saltBuckets - 1) + "," + (Short.MIN_VALUE + expectedIndexIdOffset)
+                    + PVarbinary.INSTANCE.toStringLiteral(new byte[] {(byte)(saltBuckets - 1)})
+                    + "," + (Short.MIN_VALUE + expectedIndexIdOffset)
                     + ",'" + tenantId + "','" + valuePrefix + "v2-1']";
             }
             expectedTableName = "_IDX_" + tableName;
@@ -202,7 +206,9 @@ public abstract class BaseTenantSpecificViewIndexIT extends SplitSystemCatalogIT
         assertEquals("SERVER FILTER BY FIRST KEY ONLY",
             explainPlanAttributes.getServerWhereFilter());
         assertEquals("RANGE SCAN ", explainPlanAttributes.getExplainScanType());
-        assertEquals(tableName, explainPlanAttributes.getTableName());
+        assertEquals(SchemaUtil.getTableName(SchemaUtil.getSchemaNameFromFullName(viewName),
+                        indexName) + "(" + tableName + ")",
+                explainPlanAttributes.getTableName());
         assertEquals(" [1," + tenantId + ",'" + valuePrefix + "v2-1']",
             explainPlanAttributes.getKeyRanges());
         assertEquals("CLIENT MERGE SORT",

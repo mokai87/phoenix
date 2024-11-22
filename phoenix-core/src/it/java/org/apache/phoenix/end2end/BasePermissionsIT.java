@@ -45,8 +45,9 @@ import org.apache.hadoop.hbase.security.access.AccessController;
 import org.apache.hadoop.hbase.security.access.Permission;
 import org.apache.hadoop.hbase.security.access.UserPermission;
 import org.apache.hadoop.hbase.shaded.protobuf.ResponseConverter;
+import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.JVMClusterUtil.RegionServerThread;
-import org.apache.phoenix.coprocessor.MetaDataProtocol;
+import org.apache.phoenix.coprocessorclient.MetaDataProtocol;
 import org.apache.phoenix.jdbc.PhoenixConnection;
 import org.apache.phoenix.jdbc.PhoenixDatabaseMetaData;
 import org.apache.phoenix.jdbc.PhoenixStatement;
@@ -102,7 +103,8 @@ public abstract class BasePermissionsIT extends BaseTest {
     static HBaseTestingUtility testUtil;
     private static final Set<String> PHOENIX_SYSTEM_TABLES =
             new HashSet<>(Arrays.asList("SYSTEM.CATALOG", "SYSTEM.SEQUENCE", "SYSTEM.STATS",
-                "SYSTEM.FUNCTION", "SYSTEM.MUTEX", "SYSTEM.CHILD_LINK", "SYSTEM.TRANSFORM"));
+                "SYSTEM.FUNCTION", "SYSTEM.MUTEX", "SYSTEM.CHILD_LINK", "SYSTEM.TRANSFORM",
+                    "SYSTEM.CDC_STREAM_STATUS", "SYSTEM.CDC_STREAM"));
 
     private static final Set<String> PHOENIX_SYSTEM_TABLES_IDENTIFIERS =
             new HashSet<>(Arrays.asList("SYSTEM.\"CATALOG\"", "SYSTEM.\"SEQUENCE\"",
@@ -116,7 +118,8 @@ public abstract class BasePermissionsIT extends BaseTest {
                     + PhoenixDatabaseMetaData.SYSTEM_MUTEX_TABLE_NAME + "\"";
 
     static final Set<String> PHOENIX_NAMESPACE_MAPPED_SYSTEM_TABLES = new HashSet<>(Arrays.asList(
-            "SYSTEM:CATALOG", "SYSTEM:SEQUENCE", "SYSTEM:STATS", "SYSTEM:FUNCTION", "SYSTEM:MUTEX", "SYSTEM:CHILD_LINK","SYSTEM:TRANSFORM"));
+            "SYSTEM:CATALOG", "SYSTEM:SEQUENCE", "SYSTEM:STATS", "SYSTEM:FUNCTION", "SYSTEM:MUTEX",
+            "SYSTEM:CHILD_LINK","SYSTEM:TRANSFORM", "SYSTEM:CDC_STREAM_STATUS", "SYSTEM:CDC_STREAM"));
 
     // Create Multiple users so that we can use Hadoop UGI to run tasks as various users
     // Permissions can be granted or revoke by superusers and admins only
@@ -356,7 +359,7 @@ public abstract class BasePermissionsIT extends BaseTest {
 
     private static Set<String> getHBaseTables() throws IOException {
         Set<String> tables = new HashSet<>();
-        for (TableName tn : testUtil.getHBaseAdmin().listTableNames()) {
+        for (TableName tn : testUtil.getAdmin().listTableNames()) {
             tables.add(tn.getNameAsString());
         }
         return tables;
@@ -569,6 +572,18 @@ public abstract class BasePermissionsIT extends BaseTest {
                 try (Connection conn = getConnection(); Statement stmt = conn.createStatement();) {
                     assertFalse(stmt.execute("UPDATE STATISTICS " + tableName + " SET \""
                             + QueryServices.STATS_GUIDEPOST_WIDTH_BYTES_ATTRIB + "\" = 5"));
+                    int retry = 20;
+                    while (retry-- > 0) {
+                        Thread.sleep(10000);
+                        ResultSet rs = stmt.executeQuery(
+                            "SELECT count(*) FROM SYSTEM.STATS where PHYSICAL_NAME = '"
+                            + SchemaUtil.getPhysicalHBaseTableName(tableName.getBytes(),
+                                isNamespaceMapped) + "'");
+                        rs.next();
+                        if (rs.getInt(1) > 0) {
+                            break;
+                        }
+                    }
                 }
                 return null;
             }

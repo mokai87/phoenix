@@ -32,7 +32,6 @@ import static org.apache.phoenix.jdbc.PhoenixDatabaseMetaData.TABLE_TYPE;
 import static org.apache.phoenix.jdbc.PhoenixDatabaseMetaData.TENANT_ID;
 import static org.apache.phoenix.jdbc.PhoenixDatabaseMetaData.VIEW_INDEX_ID;
 import static org.apache.phoenix.query.QueryConstants.SYSTEM_SCHEMA_NAME;
-import static org.apache.phoenix.thirdparty.com.google.common.base.Preconditions.checkNotNull;
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
@@ -69,19 +68,19 @@ import org.apache.phoenix.thirdparty.com.google.common.collect.Sets;
 import org.apache.phoenix.thirdparty.com.google.common.util.concurrent.ThreadFactoryBuilder;
 import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.CellUtil;
-import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.KeepDeletedCells;
 import org.apache.hadoop.hbase.KeyValue;
+import org.apache.hadoop.hbase.client.ColumnFamilyDescriptor;
+import org.apache.hadoop.hbase.client.ColumnFamilyDescriptorBuilder;
 import org.apache.hadoop.hbase.client.Put;
 import org.apache.hadoop.hbase.client.Result;
 import org.apache.hadoop.hbase.client.ResultScanner;
 import org.apache.hadoop.hbase.client.Scan;
 import org.apache.hadoop.hbase.client.Table;
 import org.apache.hadoop.hbase.client.TableDescriptor;
+import org.apache.hadoop.hbase.client.TableDescriptorBuilder;
 import org.apache.phoenix.schema.types.PInteger;
-import org.apache.phoenix.thirdparty.com.google.common.collect.Lists;
-import org.apache.phoenix.thirdparty.com.google.common.collect.Sets;
-import org.apache.phoenix.coprocessor.MetaDataProtocol;
+import org.apache.phoenix.coprocessorclient.MetaDataProtocol;
 import org.apache.phoenix.exception.UpgradeInProgressException;
 import org.apache.phoenix.exception.UpgradeRequiredException;
 import org.apache.phoenix.jdbc.PhoenixConnection;
@@ -89,6 +88,7 @@ import org.apache.phoenix.jdbc.PhoenixDatabaseMetaData;
 import org.apache.phoenix.query.ConnectionQueryServices;
 import org.apache.phoenix.query.ConnectionQueryServicesImpl;
 import org.apache.phoenix.query.DelegateConnectionQueryServices;
+import org.apache.phoenix.query.QueryConstants;
 import org.apache.phoenix.query.QueryServices;
 import org.apache.phoenix.schema.PName;
 import org.apache.phoenix.schema.PNameFactory;
@@ -97,7 +97,6 @@ import org.apache.phoenix.schema.PTable.LinkType;
 import org.apache.phoenix.schema.PTableType;
 import org.apache.phoenix.schema.SequenceAllocation;
 import org.apache.phoenix.schema.SequenceKey;
-import org.apache.phoenix.thirdparty.com.google.common.util.concurrent.ThreadFactoryBuilder;
 import org.apache.phoenix.util.EnvironmentEdgeManager;
 import org.apache.phoenix.util.MetaDataUtil;
 import org.apache.phoenix.util.PhoenixRuntime;
@@ -125,8 +124,7 @@ public class UpgradeIT extends ParallelStatsDisabledIT {
                     return true;
                 }
             };
-            try (PhoenixConnection phxConn = new PhoenixConnection(servicesWithUpgrade, getUrl(), PropertiesUtil.deepCopy(TestUtil.TEST_PROPERTIES), 
-                    conn.unwrap(PhoenixConnection.class).getMetaDataCache())) {
+            try (PhoenixConnection phxConn = new PhoenixConnection(servicesWithUpgrade, getUrl(), PropertiesUtil.deepCopy(TestUtil.TEST_PROPERTIES))) {
                 try {
                     phxConn.createStatement().execute(
                             "CREATE TABLE " + generateUniqueName()
@@ -331,6 +329,95 @@ public class UpgradeIT extends ParallelStatsDisabledIT {
         testParentChildLinksHelper(true);
     }
 
+    @Test
+    public void testCopyTTLValuesFromPhoenixTTLColumnToTTLColumn() throws Exception {
+        try (PhoenixConnection conn = getConnection(false, null).unwrap(PhoenixConnection.class);
+        Connection metaConn = getConnection(false, null, false, false)) {
+            String dml = "UPSERT INTO SYSTEM.CATALOG (TENANT_ID, TABLE_SCHEM, TABLE_NAME, PHOENIX_TTL) VALUES (?,?,?,?)";
+            String tableName = "T_" + generateUniqueName();
+            String tableName1 = "T_" + generateUniqueName();
+            String tableName2 = "T_" + generateUniqueName();
+            long randomValue = 181938859789797187L;
+            long randomIntValue = 156743;
+            PreparedStatement prepareStatement = conn.prepareStatement(dml);
+            //Set Null PHOENIX_TTL values
+            for (int i = 1; i < 6; i++) {
+                prepareStatement.setString(1, null);
+                prepareStatement.setString(2, "S_" + generateUniqueName());
+                prepareStatement.setString(3, "T_" + generateUniqueName());
+                prepareStatement.setNull(4, Types.BIGINT);
+                prepareStatement.execute();
+            }
+            //Set Random PHOENIX_TLL value less than INT_MAX
+            prepareStatement.setString(1, null);
+            prepareStatement.setString(2, "S_" + generateUniqueName());
+            prepareStatement.setString(3, tableName);
+            prepareStatement.setLong(4, randomValue);
+            prepareStatement.execute();
+            //Set Random PHOENIX_TLL value between INT_MAX and LONG_MAX
+            prepareStatement.setString(1, null);
+            prepareStatement.setString(2, "S_" + generateUniqueName());
+            prepareStatement.setString(3, tableName1);
+            prepareStatement.setLong(4, randomIntValue);
+            prepareStatement.execute();
+            //Set Long Max PHOENIX_TTL value
+            prepareStatement.setString(1, null);
+            prepareStatement.setString(2, "S_" + generateUniqueName());
+            prepareStatement.setString(3, tableName2);
+            prepareStatement.setLong(4, Long.MAX_VALUE);
+            prepareStatement.execute();
+            conn.commit();
+
+            String sql = "SELECT PHOENIX_TTL FROM SYSTEM.CATALOG WHERE TABLE_NAME = '" + tableName + "'";
+            ResultSet rs = conn.createStatement().executeQuery(sql);
+            rs.next();
+            assertEquals("Should have return one value for PHOENIX_TTL column",randomValue, rs.getLong(1));
+
+            String sql1 = "SELECT PHOENIX_TTL FROM SYSTEM.CATALOG WHERE TABLE_NAME = '" + tableName1 + "'";
+            ResultSet rs1 = conn.createStatement().executeQuery(sql1);
+            rs1.next();
+            assertEquals("Should have return one value for PHOENIX_TTL column",randomIntValue, rs1.getLong(1));
+
+            String sql2 = "SELECT PHOENIX_TTL FROM SYSTEM.CATALOG WHERE TABLE_NAME = '" + tableName2 + "'";
+            ResultSet rs2 = conn.createStatement().executeQuery(sql2);
+            rs2.next();
+            assertEquals("Should have return one value for PHOENIX_TTL column",Long.MAX_VALUE, rs2.getLong(1));
+
+            PhoenixConnection phxMetaConn = metaConn.unwrap(PhoenixConnection.class);
+            phxMetaConn.setRunningUpgrade(true);
+
+            Map<String, String> options = new HashMap<>();
+            options.put(HConstants.HBASE_RPC_TIMEOUT_KEY, Integer.toString(DEFAULT_TIMEOUT_DURING_UPGRADE_MS));
+            options.put(HConstants.HBASE_CLIENT_SCANNER_TIMEOUT_PERIOD, Integer.toString(DEFAULT_TIMEOUT_DURING_UPGRADE_MS));
+            String clientPort = getUtility().getConfiguration().get(QueryServices.ZOOKEEPER_PORT_ATTRIB);
+
+            String localQuorum = String.format("localhost:%s", clientPort);
+            options.put(QueryServices.ZOOKEEPER_QUORUM_ATTRIB, localQuorum);
+            options.put(QueryServices.ZOOKEEPER_PORT_ATTRIB, clientPort);
+            //Copy Values from PHOENIX_TTL to TTL
+            UpgradeUtil.copyTTLValuesFromPhoenixTTLColumnToTTLColumn(phxMetaConn, options);
+
+            String sql3 = "SELECT TTL FROM SYSTEM.CATALOG WHERE TABLE_NAME = '" + tableName + "'";
+            ResultSet rs3 = conn.createStatement().executeQuery(sql3);
+            assertTrue(rs3.next());
+            int ttl = Integer.valueOf(rs3.getString(1));
+            assertEquals("Should have return one value for PHOENIX_TTL column",Integer.MAX_VALUE, ttl);
+
+            String sql4 = "SELECT TTL FROM SYSTEM.CATALOG WHERE TABLE_NAME = '" + tableName1 + "'";
+            ResultSet rs4 = conn.createStatement().executeQuery(sql4);
+            assertTrue(rs4.next());
+            ttl = Integer.valueOf(rs4.getString(1));
+            assertEquals("Should have return one value for PHOENIX_TTL column",randomIntValue, ttl);
+
+            String sql5 = "SELECT TTL FROM SYSTEM.CATALOG WHERE TABLE_NAME = '" + tableName2 + "'";
+            ResultSet rs5 = conn.createStatement().executeQuery(sql5);
+            assertTrue(rs5.next());
+            ttl = Integer.valueOf(rs5.getString(1));
+            assertEquals("Should have return one value for PHOENIX_TTL column",Integer.MAX_VALUE, ttl);
+        }
+    }
+
+
     private void testParentChildLinksHelper(boolean copyMode) throws Exception {
         String schema = "S_" + generateUniqueName();
         String table1 = "T_" + generateUniqueName();
@@ -421,7 +508,7 @@ public class UpgradeIT extends ParallelStatsDisabledIT {
                     HConstants.VERSIONS + "='1000'\n");
         }
         //Check that the HBase tables reflect the change
-        PTable sysLogTable = PhoenixRuntime.getTable(conn, PhoenixDatabaseMetaData.SYSTEM_LOG_NAME);
+        PTable sysLogTable = conn.getTable(PhoenixDatabaseMetaData.SYSTEM_LOG_NAME);
         TableDescriptor sysLogDesc = utility.getAdmin().getDescriptor(SchemaUtil.getPhysicalTableName(
             PhoenixDatabaseMetaData.SYSTEM_LOG_NAME, cqs.getProps()));
         assertEquals(KeepDeletedCells.TRUE, sysLogDesc.getColumnFamily(
@@ -429,7 +516,7 @@ public class UpgradeIT extends ParallelStatsDisabledIT {
         assertEquals(1000, sysLogDesc.getColumnFamily(
                 SchemaUtil.getEmptyColumnFamily(sysLogTable)).getMaxVersions());
 
-        PTable sysStatsTable = PhoenixRuntime.getTable(conn, PhoenixDatabaseMetaData.SYSTEM_STATS_NAME);
+        PTable sysStatsTable = conn.getTable(PhoenixDatabaseMetaData.SYSTEM_STATS_NAME);
         TableDescriptor sysStatsDesc = utility.getAdmin().getDescriptor(SchemaUtil.getPhysicalTableName(
             PhoenixDatabaseMetaData.SYSTEM_STATS_NAME, cqs.getProps()));
         assertEquals(KeepDeletedCells.TRUE, sysStatsDesc.getColumnFamily(
@@ -455,6 +542,60 @@ public class UpgradeIT extends ParallelStatsDisabledIT {
             SchemaUtil.getEmptyColumnFamily(sysStatsTable)).getKeepDeletedCells());
         assertEquals(1, sysStatsDesc.getColumnFamily(
             SchemaUtil.getEmptyColumnFamily(sysStatsTable)).getMaxVersions());
+    }
+
+    @Test
+    public void testCacheOnWritePropsOnSystemSequence() throws Exception {
+        PhoenixConnection conn = getConnection(false, null).
+            unwrap(PhoenixConnection.class);
+        ConnectionQueryServicesImpl cqs = (ConnectionQueryServicesImpl)(conn.getQueryServices());
+
+        TableDescriptor initialTD = utility.getAdmin().getDescriptor(
+            SchemaUtil.getPhysicalTableName(PhoenixDatabaseMetaData.SYSTEM_SEQUENCE_NAME,
+                cqs.getProps()));
+        ColumnFamilyDescriptor initialCFD = initialTD.getColumnFamily(
+            QueryConstants.DEFAULT_COLUMN_FAMILY_BYTES);
+
+        // Confirm that the Cache-On-Write related properties are set
+        // on SYSTEM.SEQUENCE during creation.
+        assertEquals(Boolean.TRUE, initialCFD.isCacheBloomsOnWrite());
+        assertEquals(Boolean.TRUE, initialCFD.isCacheDataOnWrite());
+        assertEquals(Boolean.TRUE, initialCFD.isCacheIndexesOnWrite());
+
+        // Check to see whether the Cache-On-Write related properties are set on
+        // pre-existing tables too via the upgrade path. We do the below to test it :
+        // 1. Explicitly disable the Cache-On-Write related properties on the table.
+        // 2. Call the Upgrade Path on the table.
+        // 3. Verify that the property is set after the upgrades too.
+        ColumnFamilyDescriptorBuilder newCFBuilder =
+            ColumnFamilyDescriptorBuilder.newBuilder(initialCFD);
+        newCFBuilder.setCacheBloomsOnWrite(false);
+        newCFBuilder.setCacheDataOnWrite(false);
+        newCFBuilder.setCacheIndexesOnWrite(false);
+        TableDescriptorBuilder newTD = TableDescriptorBuilder.newBuilder(initialTD);
+        newTD.modifyColumnFamily(newCFBuilder.build());
+        utility.getAdmin().modifyTable(newTD.build());
+
+        // Check that the Cache-On-Write related properties are now disabled.
+        TableDescriptor updatedTD = utility.getAdmin().getDescriptor(
+            SchemaUtil.getPhysicalTableName(PhoenixDatabaseMetaData.SYSTEM_SEQUENCE_NAME,
+                cqs.getProps()));
+        ColumnFamilyDescriptor updatedCFD = updatedTD.getColumnFamily(
+            QueryConstants.DEFAULT_COLUMN_FAMILY_BYTES);
+        assertEquals(Boolean.FALSE, updatedCFD.isCacheBloomsOnWrite());
+        assertEquals(Boolean.FALSE, updatedCFD.isCacheDataOnWrite());
+        assertEquals(Boolean.FALSE, updatedCFD.isCacheIndexesOnWrite());
+
+        // Let's try upgrading the existing table - and see if the property is set on
+        // during upgrades.
+        cqs.upgradeSystemSequence(conn, new HashMap<String, String>());
+
+        updatedTD = utility.getAdmin().getDescriptor(SchemaUtil.getPhysicalTableName(
+            PhoenixDatabaseMetaData.SYSTEM_SEQUENCE_NAME, cqs.getProps()));
+        updatedCFD = updatedTD.getColumnFamily(QueryConstants.DEFAULT_COLUMN_FAMILY_BYTES);
+        assertEquals(Boolean.TRUE, updatedCFD.isCacheBloomsOnWrite());
+        assertEquals(Boolean.TRUE, updatedCFD.isCacheDataOnWrite());
+        assertEquals(Boolean.TRUE, updatedCFD.isCacheIndexesOnWrite());
     }
 
     private Set<String> getChildLinks(Connection conn, String tableName) throws SQLException {
@@ -626,10 +767,12 @@ public class UpgradeIT extends ParallelStatsDisabledIT {
 
     @Test
     public void testLastDDLTimestampBootstrap() throws Exception {
+        Long testStartTime = EnvironmentEdgeManager.currentTimeMillis();
         //Create a table, view, and index
         String schemaName = "S_" + generateUniqueName();
         String tableName = "T_" + generateUniqueName();
         String viewName = "V_" + generateUniqueName();
+        String indexName = "I_" + generateUniqueName();
         String fullTableName = SchemaUtil.getTableName(schemaName, tableName);
         String fullViewName = SchemaUtil.getTableName(schemaName, viewName);
         try (Connection conn = getConnection(false, null)) {
@@ -640,6 +783,8 @@ public class UpgradeIT extends ParallelStatsDisabledIT {
             conn.createStatement().execute(
                 "CREATE VIEW " + fullViewName + " AS SELECT * FROM " + fullTableName);
 
+            conn.createStatement().execute("CREATE INDEX " + indexName + " ON " + fullTableName + " (KV1) ASYNC");
+
             //Now we null out any existing last ddl timestamps
             nullDDLTimestamps(conn);
 
@@ -647,26 +792,41 @@ public class UpgradeIT extends ParallelStatsDisabledIT {
             long tableTS = getRowTimestampForMetadata(conn, schemaName, tableName,
                 PTableType.TABLE);
             long viewTS = getRowTimestampForMetadata(conn, schemaName, viewName, PTableType.VIEW);
+            long indexTS = getRowTimestampForMetadata(conn, schemaName, indexName, PTableType.INDEX);
+            assertTrue(tableTS > testStartTime);
+            assertTrue(viewTS > testStartTime);
+            assertTrue(indexTS > testStartTime);
 
-            UpgradeUtil.bootstrapLastDDLTimestamp(conn.unwrap(PhoenixConnection.class));
+            // bootstrap last ddl timestamp for tables and views
+            UpgradeUtil.bootstrapLastDDLTimestampForTablesAndViews(conn.unwrap(PhoenixConnection.class));
             long actualTableTS = getLastTimestampForMetadata(conn, schemaName, tableName,
                 PTableType.TABLE);
             long actualViewTS = getLastTimestampForMetadata(conn, schemaName, viewName,
                 PTableType.VIEW);
+            long actualIndexTS = getLastTimestampForMetadata(conn, schemaName, indexName,
+                    PTableType.INDEX);
             assertEquals(tableTS, actualTableTS);
             assertEquals(viewTS, actualViewTS);
+            // only tables and views were bootstrapped
+            assertEquals(0L, actualIndexTS);
+
+            // bootstrap last ddl timestamp for indexes
+            UpgradeUtil.bootstrapLastDDLTimestampForIndexes(conn.unwrap(PhoenixConnection.class));
+            actualIndexTS = getLastTimestampForMetadata(conn, schemaName, indexName, PTableType.INDEX);
+            assertEquals(indexTS, actualIndexTS);
 
         }
     }
 
     private void nullDDLTimestamps(Connection conn) throws SQLException {
+        //ignore system tables since that can interfere with other tests.
         String pkCols = TENANT_ID + ", " + TABLE_SCHEM +
             ", " + TABLE_NAME + ", " + COLUMN_NAME + ", " + COLUMN_FAMILY;
         String upsertSql =
             "UPSERT INTO " + SYSTEM_CATALOG_NAME + " (" + pkCols + ", " +
                 LAST_DDL_TIMESTAMP + ")" + " " +
                 "SELECT " + pkCols + ", NULL FROM " + SYSTEM_CATALOG_NAME + " " +
-                "WHERE " + TABLE_TYPE + " IS NOT NULL";
+                "WHERE " + TABLE_TYPE + " " + " != '" + PTableType.SYSTEM.getSerializedValue() + "'";
         conn.createStatement().execute(upsertSql);
         conn.commit();
     }

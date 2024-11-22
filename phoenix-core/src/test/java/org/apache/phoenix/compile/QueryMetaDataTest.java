@@ -17,7 +17,6 @@
  */
 package org.apache.phoenix.compile;
 
-import static org.apache.phoenix.util.TestUtil.PHOENIX_JDBC_URL;
 import static org.junit.Assert.assertEquals;
 
 import java.math.BigDecimal;
@@ -310,7 +309,8 @@ public class QueryMetaDataTest extends BaseConnectionlessQueryTest {
         assertEquals("organization_id".toUpperCase(),md.getColumnName(1));
         assertEquals("a_string".toUpperCase(),md.getColumnName(2));
         assertEquals("b_string".toUpperCase(),md.getColumnName(3));
-        assertEquals("i".toUpperCase(),md.getColumnName(4));
+        assertEquals("a_integer".toUpperCase(),md.getColumnName(4));
+        assertEquals("i".toUpperCase(),md.getColumnLabel(4));
         assertEquals("a_date".toUpperCase(),md.getColumnName(5));
         
         assertEquals(String.class.getName(),md.getColumnClassName(1));
@@ -433,7 +433,7 @@ public class QueryMetaDataTest extends BaseConnectionlessQueryTest {
     @Test
     public void testBindParamMetaDataForNestedRVC() throws Exception {
         String query = "SELECT organization_id, entity_id, a_string FROM aTable WHERE (organization_id, (entity_id, a_string)) >= (?, (?, ?))";
-        Connection conn = DriverManager.getConnection(PHOENIX_JDBC_URL, PropertiesUtil.deepCopy(TestUtil.TEST_PROPERTIES));
+        Connection conn = DriverManager.getConnection(getUrl(), PropertiesUtil.deepCopy(TestUtil.TEST_PROPERTIES));
         PreparedStatement statement = conn.prepareStatement(query);
         ParameterMetaData pmd = statement.getParameterMetaData();
         assertEquals(3, pmd.getParameterCount());

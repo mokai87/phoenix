@@ -17,7 +17,7 @@
  */
 package org.apache.phoenix.util;
 
-import static org.apache.phoenix.coprocessor.MetaDataEndpointImpl.VIEW_MODIFIED_PROPERTY_BYTES;
+import static org.apache.phoenix.coprocessorclient.MetaDataEndpointImplConstants.VIEW_MODIFIED_PROPERTY_BYTES;
 import static org.apache.phoenix.jdbc.PhoenixDatabaseMetaData.LAST_DDL_TIMESTAMP_BYTES;
 import static org.apache.phoenix.jdbc.PhoenixDatabaseMetaData.UPDATE_CACHE_FREQUENCY_BYTES;
 import static org.junit.Assert.assertArrayEquals;
@@ -40,13 +40,12 @@ import org.apache.hadoop.hbase.TagUtil;
 import org.apache.hadoop.hbase.client.Put;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.hbase.util.VersionInfo;
-import org.apache.phoenix.coprocessor.MetaDataProtocol;
+import org.apache.phoenix.coprocessorclient.MetaDataProtocol;
 import org.apache.phoenix.exception.SQLExceptionCode;
 import org.apache.phoenix.hbase.index.util.GenericKeyValueBuilder;
 import org.apache.phoenix.hbase.index.util.ImmutableBytesPtr;
 import org.apache.phoenix.hbase.index.util.KeyValueBuilder;
 import org.apache.phoenix.hbase.index.util.VersionUtil;
-import org.apache.phoenix.jdbc.PhoenixDatabaseMetaData;
 import org.apache.phoenix.query.HBaseFactoryProvider;
 import org.apache.phoenix.query.QueryServices;
 import org.apache.phoenix.schema.SortOrder;
@@ -332,7 +331,7 @@ public class MetaDataUtilTest {
       assertNotNull(p);
       assertFalse("Mutation is empty!", p.isEmpty());
       assertArrayEquals(tableHeaderRowKey, p.getRow());
-      assertEquals(clientTimestamp, p.getTimeStamp());
+      assertEquals(clientTimestamp, p.getTimestamp());
       assertTrue(p.cellScanner().advance());
       List<Cell> cells = p.get(TABLE_FAMILY_BYTES, LAST_DDL_TIMESTAMP_BYTES);
       assertNotNull(cells);
@@ -342,17 +341,5 @@ public class MetaDataUtilTest {
       assertEquals(serverTimestamp, PLong.INSTANCE.getCodec().decodeLong(CellUtil.cloneValue(c),
           0, SortOrder.ASC));
     }
-
-    private static byte[] concatTags(byte[] tags, Cell cell) {
-        int cellTagsLen = cell.getTagsLength();
-        if (cellTagsLen == 0) {
-            return tags;
-        }
-        byte[] b = new byte[tags.length + cellTagsLen];
-        int pos = Bytes.putBytes(b, 0, tags, 0, tags.length);
-        Bytes.putBytes(b, pos, cell.getTagsArray(), cell.getTagsOffset(), cellTagsLen);
-        return b;
-    }
-
 }
 

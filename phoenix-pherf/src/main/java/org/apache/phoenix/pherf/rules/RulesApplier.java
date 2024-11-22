@@ -18,25 +18,37 @@
 
 package org.apache.phoenix.pherf.rules;
 
-import org.apache.phoenix.thirdparty.com.google.common.base.Preconditions;
-import org.apache.phoenix.thirdparty.com.google.common.collect.Lists;
-import org.apache.commons.math3.random.RandomDataGenerator;
-import org.apache.phoenix.pherf.PherfConstants;
+import java.time.Instant;
+import java.time.LocalDateTime;
+import java.time.ZoneId;
+import java.time.ZonedDateTime;
+import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.Map;
+import java.util.Random;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ThreadLocalRandom;
+
 import org.apache.commons.lang3.RandomStringUtils;
 import org.apache.commons.lang3.RandomUtils;
 import org.apache.commons.lang3.StringUtils;
-import org.apache.phoenix.pherf.configuration.*;
+import org.apache.commons.math3.random.RandomDataGenerator;
+import org.apache.phoenix.pherf.PherfConstants;
+import org.apache.phoenix.pherf.configuration.Column;
+import org.apache.phoenix.pherf.configuration.DataModel;
+import org.apache.phoenix.pherf.configuration.DataSequence;
+import org.apache.phoenix.pherf.configuration.DataTypeMapping;
+import org.apache.phoenix.pherf.configuration.Scenario;
+import org.apache.phoenix.pherf.configuration.XMLConfigParser;
+import org.apache.phoenix.thirdparty.com.google.common.base.Preconditions;
+import org.apache.phoenix.thirdparty.com.google.common.collect.Lists;
 import org.apache.phoenix.util.EnvironmentEdgeManager;
-import org.joda.time.DateTime;
-import org.joda.time.DateTimeZone;
-import org.joda.time.format.DateTimeFormat;
-import org.joda.time.format.DateTimeFormatter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
-import java.util.*;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ThreadLocalRandom;
 
 public class RulesApplier {
     private static final Logger LOGGER = LoggerFactory.getLogger(RulesApplier.class);
@@ -143,7 +155,8 @@ public class RulesApplier {
         List<Scenario> scenarios = dataModel != null ? dataModel.getScenarios() : parser.getScenarios();
         DataValue value = null;
         if (scenarios.contains(scenario)) {
-            LOGGER.debug("We found a correct Scenario" + scenario.getName());
+            LOGGER.debug("We found a correct Scenario" + scenario.getName() +
+                    "column " + phxMetaColumn.getName() + " " + phxMetaColumn.getType());
             
             Map<DataTypeMapping, List> overrideRuleMap = this.getCachedScenarioOverrides(scenario);
             
@@ -151,7 +164,7 @@ public class RulesApplier {
 	            List<Column> overrideRuleList = this.getCachedScenarioOverrides(scenario).get(phxMetaColumn.getType());
 	            
 				if (overrideRuleList != null && overrideRuleList.contains(phxMetaColumn)) {
-					LOGGER.debug("We found a correct override column rule");
+                    LOGGER.debug("We found a correct override column rule" + overrideRuleList);
 					Column columnRule = getColumnForRuleOverride(overrideRuleList, phxMetaColumn);
 					if (columnRule != null) {
 						return getDataValue(columnRule);
@@ -166,7 +179,7 @@ public class RulesApplier {
             // Make sure Column from Phoenix Metadata matches a rule column
             if (ruleList != null && ruleList.contains(phxMetaColumn)) {
                 // Generate some random data based on this rule
-                LOGGER.debug("We found a correct column rule");
+                LOGGER.debug("We found a correct column rule" + ruleList);
                 Column columnRule = getColumnForRule(ruleList, phxMetaColumn);
 
                 value = getDataValue(columnRule);
@@ -210,107 +223,117 @@ public class RulesApplier {
         }
 
         switch (column.getType()) {
-            case VARCHAR:
-            case VARBINARY:
-            case CHAR:
-                // Use the specified data values from configs if they exist
-                if (DataSequence.SEQUENTIAL.equals(column.getDataSequence())) {
-                    RuleBasedDataGenerator generator = getRuleBasedDataGeneratorForColumn(column);
-                    data = generator.getDataValue();
-                } else if ((column.getDataValues() != null) && (column.getDataValues().size() > 0)) {
-                    data = pickDataValueFromList(dataValues);
-                } else {
-                    Preconditions.checkArgument(length > 0, "length needs to be > 0");
-                    data = getRandomDataValue(column);
-                }
-                break;
-            case VARCHAR_ARRAY:
-            	//only list datavalues are supported
-            	String arr = "";
-            	for (DataValue dv : dataValues) {
-            		arr += "," + dv.getValue();
-            	}
-            	if (arr.startsWith(",")) {
-            		arr = arr.replaceFirst(",", "");
-            	}
-            	data = new DataValue(column.getType(), arr);
-            	break;
-            case DECIMAL:
-                if ((column.getDataValues() != null) && (column.getDataValues().size() > 0)) {
-                    data = pickDataValueFromList(dataValues);
-                } else {
-                    int precision = column.getPrecision();
-                    double minDbl = column.getMinValue();
-                    Preconditions.checkArgument((precision > 0) && (precision <= 18), "Precision must be between 0 and 18");
-                    Preconditions.checkArgument(minDbl >= 0, "minvalue must be set in configuration for decimal");
-                    Preconditions.checkArgument(column.getMaxValue() > 0, "maxValue must be set in configuration decimal");
-                    StringBuilder maxValueStr = new StringBuilder();
+        case VARCHAR:
+        case VARBINARY:
+        case JSON:
+        case BSON:
+        case CHAR:
+            // Use the specified data values from configs if they exist
+            if (DataSequence.SEQUENTIAL.equals(column.getDataSequence())) {
+                RuleBasedDataGenerator generator = getRuleBasedDataGeneratorForColumn(column);
+                data = generator.getDataValue();
+            } else if ((column.getDataValues() != null) && (column.getDataValues().size() > 0)) {
+                data = pickDataValueFromList(dataValues);
+            } else {
+                Preconditions.checkArgument(length > 0, "length needs to be > 0");
+                data = getRandomDataValue(column);
+            }
+            break;
+        case VARCHAR_ARRAY:
+            //only list datavalues are supported
+            String arr = "";
+            for (DataValue dv : dataValues) {
+                arr += "," + dv.getValue();
+            }
+            if (arr.startsWith(",")) {
+                arr = arr.replaceFirst(",", "");
+            }
+            data = new DataValue(column.getType(), arr);
+            break;
+        case DECIMAL:
+            if ((column.getDataValues() != null) && (column.getDataValues().size() > 0)) {
+                data = pickDataValueFromList(dataValues);
+            } else {
+                int precision = column.getPrecision();
+                double minDbl = column.getMinValue();
+                Preconditions.checkArgument((precision > 0) && (precision <= 18),
+                        "Precision must be between 0 and 18");
+                Preconditions.checkArgument(minDbl >= 0,
+                        "minvalue must be set in configuration for decimal");
+                Preconditions.checkArgument(column.getMaxValue() > 0,
+                        "maxValue must be set in configuration decimal");
+                StringBuilder maxValueStr = new StringBuilder();
 
-                    for (int i = 0; i < precision; i++) {
-                        maxValueStr.append(9);
-                    }
+                for (int i = 0; i < precision; i++) {
+                    maxValueStr.append(9);
+                }
 
-                    double maxDbl = Math.min(column.getMaxValue(), Double.parseDouble(maxValueStr.toString()));
-                    final double dbl = RandomUtils.nextDouble(minDbl, maxDbl);
-                    data = new DataValue(column.getType(), String.valueOf(dbl));
+                double maxDbl =
+                        Math.min(column.getMaxValue(), Double.parseDouble(maxValueStr.toString()));
+                final double dbl = RandomUtils.nextDouble(minDbl, maxDbl);
+                data = new DataValue(column.getType(), String.valueOf(dbl));
+            }
+            break;
+        case TINYINT:
+        case INTEGER:
+            if ((column.getDataValues() != null) && (column.getDataValues().size() > 0)) {
+                data = pickDataValueFromList(dataValues);
+            } else if (DataSequence.SEQUENTIAL.equals(column.getDataSequence())) {
+                RuleBasedDataGenerator generator = getRuleBasedDataGeneratorForColumn(column);
+                data = generator.getDataValue();
+            } else {
+                int minInt = (int) column.getMinValue();
+                int maxInt = (int) column.getMaxValue();
+                if (column.getType() == DataTypeMapping.TINYINT) {
+                    Preconditions.checkArgument((minInt >= -128) && (minInt <= 128),
+                            "min value need to be set in configuration for tinyints " + column.getName());
+                    Preconditions.checkArgument((maxInt >= -128) && (maxInt <= 128),
+                            "max value need to be set in configuration for tinyints " + column.getName());
                 }
-                break;
-            case TINYINT:
-            case INTEGER:
-                if ((column.getDataValues() != null) && (column.getDataValues().size() > 0)) {
-                    data = pickDataValueFromList(dataValues);
-                } else if(DataSequence.SEQUENTIAL.equals(column.getDataSequence())) {
-                    RuleBasedDataGenerator generator = getRuleBasedDataGeneratorForColumn(column);
-                    data = generator.getDataValue();
-                } else {
-                    int minInt = (int) column.getMinValue();
-                    int maxInt = (int) column.getMaxValue();
-                    if (column.getType() == DataTypeMapping.TINYINT) {
-                        Preconditions.checkArgument((minInt >= -128) && (minInt <= 128), "min value need to be set in configuration for tinyints " + column.getName());
-                        Preconditions.checkArgument((maxInt >= -128) && (maxInt <= 128), "max value need to be set in configuration for tinyints " + column.getName());
-                    }
-                    int intVal = ThreadLocalRandom.current().nextInt(minInt, maxInt + 1);
-                    data = new DataValue(column.getType(), String.valueOf(intVal));
-                }
-                break;
-            case BIGINT:
-            case UNSIGNED_LONG:
-                if ((column.getDataValues() != null) && (column.getDataValues().size() > 0)) {
-                    data = pickDataValueFromList(dataValues);
-                } else {
-                    long minLong = column.getMinValue();
-                    long maxLong = column.getMaxValue();
-                    if (column.getType() == DataTypeMapping.UNSIGNED_LONG)
-                        Preconditions.checkArgument((minLong > 0) && (maxLong > 0), "min and max values need to be set in configuration for unsigned_longs " + column.getName());
-                    long longVal = RandomUtils.nextLong(minLong, maxLong);
-                    data = new DataValue(column.getType(), String.valueOf(longVal));
-                }
-                break;
-            case DATE:
-            case TIMESTAMP:
-                if ((column.getDataValues() != null) && (column.getDataValues().size() > 0)) {
-                    data = pickDataValueFromList(dataValues);
-                    // Check if date has right format or not
-                    data.setValue(checkDatePattern(data.getValue()));
-                } else if(DataSequence.SEQUENTIAL.equals(column.getDataSequence())) {
-                    RuleBasedDataGenerator generator = getRuleBasedDataGeneratorForColumn(column);
-                    data = generator.getDataValue();
-                } else if (column.getUseCurrentDate() != true){
-                    int minYear = (int) column.getMinValue();
-                    int maxYear = (int) column.getMaxValue();
-                    Preconditions.checkArgument((minYear > 0) && (maxYear > 0), "min and max values need to be set in configuration for date/timestamps " + column.getName());
+                int intVal = ThreadLocalRandom.current().nextInt(minInt, maxInt + 1);
+                data = new DataValue(column.getType(), String.valueOf(intVal));
+            }
+            break;
+        case BIGINT:
+        case UNSIGNED_LONG:
+            if ((column.getDataValues() != null) && (column.getDataValues().size() > 0)) {
+                data = pickDataValueFromList(dataValues);
+            } else {
+                long minLong = column.getMinValue();
+                long maxLong = column.getMaxValue();
+                if (column.getType() == DataTypeMapping.UNSIGNED_LONG)
+                    Preconditions.checkArgument((minLong > 0) && (maxLong > 0),
+                            "min and max values need to be set in configuration for unsigned_longs " + column.getName());
+                long longVal = RandomUtils.nextLong(minLong, maxLong);
+                data = new DataValue(column.getType(), String.valueOf(longVal));
+            }
+            break;
+        case DATE:
+        case TIMESTAMP:
+            if ((column.getDataValues() != null) && (column.getDataValues().size() > 0)) {
+                data = pickDataValueFromList(dataValues);
+                // Check if date has right format or not
+                data.setValue(checkDatePattern(data.getValue()));
+            } else if (DataSequence.SEQUENTIAL.equals(column.getDataSequence())) {
+                RuleBasedDataGenerator generator = getRuleBasedDataGeneratorForColumn(column);
+                data = generator.getDataValue();
+            } else if (column.getUseCurrentDate() != true) {
+                int minYear = (int) column.getMinValue();
+                int maxYear = (int) column.getMaxValue();
+                Preconditions.checkArgument((minYear > 0) && (maxYear > 0),
+                        "min and max values need to be set in configuration for date/timestamps " + column.getName());
 
-                    String dt = generateRandomDate(minYear, maxYear);
-                    data = new DataValue(column.getType(), dt);
-                    data.setMaxValue(String.valueOf(minYear));
-                    data.setMinValue(String.valueOf(maxYear));
-                } else {
-                    String dt = getCurrentDate();
-                    data = new DataValue(column.getType(), dt);
-                }
-                break;
-            default:
-                break;
+                String dt = generateRandomDate(minYear, maxYear);
+                data = new DataValue(column.getType(), dt);
+                data.setMaxValue(String.valueOf(minYear));
+                data.setMinValue(String.valueOf(maxYear));
+            } else {
+                String dt = getCurrentDate();
+                data = new DataValue(column.getType(), dt);
+            }
+            break;
+        default:
+            break;
         }
         Preconditions.checkArgument(data != null,
                 "Data value could not be generated for some reason. Please check configs");
@@ -325,28 +348,32 @@ public class RulesApplier {
     }
 
     public String generateRandomDate(String min, String max) throws Exception {
-        DateTimeFormatter fmtr = DateTimeFormat.forPattern(PherfConstants.DEFAULT_DATE_PATTERN).withZone(DateTimeZone.UTC);
-        DateTime minDt;
-        DateTime maxDt;
-        DateTime dt;
+        DateTimeFormatter fmtr =
+                DateTimeFormatter.ofPattern(PherfConstants.DEFAULT_DATE_PATTERN)
+                        .withZone(ZoneId.of("UTC"));
+        Instant minDt;
+        Instant maxDt;
+        Instant dt;
 
-        minDt = fmtr.parseDateTime(checkDatePattern(min));
-        maxDt = fmtr.parseDateTime(checkDatePattern(max));
+        minDt = ZonedDateTime.parse(checkDatePattern(min), fmtr).toInstant();
+        maxDt = ZonedDateTime.parse(checkDatePattern(max), fmtr).toInstant();
 
         // Get Ms Date between min and max
         synchronized (randomDataGenerator) {
             //Make sure date generated is exactly between the passed limits
-            long rndLong = randomDataGenerator.nextLong(minDt.getMillis()+1, maxDt.getMillis()-1);
-            dt = new DateTime(rndLong, PherfConstants.DEFAULT_TIME_ZONE);
+            long rndLong = randomDataGenerator.nextLong(minDt.toEpochMilli()+1, maxDt.toEpochMilli()-1);
+            dt = Instant.ofEpochMilli(rndLong);
         }
 
-        return fmtr.print(dt);
+        return fmtr.format(dt);
     }
 
     public String getCurrentDate() {
-        DateTimeFormatter fmtr = DateTimeFormat.forPattern(PherfConstants.DEFAULT_DATE_PATTERN).withZone(DateTimeZone.UTC);;
-        DateTime dt = new DateTime(PherfConstants.DEFAULT_TIME_ZONE);
-        return fmtr.print(dt);
+        DateTimeFormatter fmtr =
+                DateTimeFormatter.ofPattern(PherfConstants.DEFAULT_DATE_PATTERN)
+                        .withZone(ZoneId.of("UTC"));
+        LocalDateTime dt = LocalDateTime.now();
+        return fmtr.format(dt);
     }
 
     /**
@@ -422,9 +449,11 @@ public class RulesApplier {
 
     // Checks if date is in defult pattern
     public String checkDatePattern(String date) {
-        DateTimeFormatter fmtr = DateTimeFormat.forPattern(PherfConstants.DEFAULT_DATE_PATTERN).withZone(DateTimeZone.UTC);;
-        DateTime parsedDate = fmtr.parseDateTime(date);
-        return fmtr.print(parsedDate);
+        DateTimeFormatter fmtr =
+                DateTimeFormatter.ofPattern(PherfConstants.DEFAULT_DATE_PATTERN)
+                        .withZone(ZoneId.of("UTC"));
+        Instant parsedDate = ZonedDateTime.parse(date, fmtr).toInstant();
+        return fmtr.format(parsedDate);
     }
 
     /**
@@ -551,6 +580,8 @@ public class RulesApplier {
             //For now we only have couple of these, likely this should replace for all the methods
             switch (column.getType()) {
             case VARCHAR:
+            case JSON:
+            case BSON:
             case VARBINARY:
             case CHAR:
                 if ((column.getDataValues() != null) && (column.getDataValues().size() > 0)) {

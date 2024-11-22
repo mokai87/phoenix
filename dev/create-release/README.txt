@@ -54,6 +54,28 @@ on caching the unlocked secret via ~/.gnupg/gpg-agent.conf
   default-cache-ttl 86400
   max-cache-ttl 86400
 
+In the current version, passphrase entry doesn't work at all, at least for Linux Docker builds.
+Increasing the TTL only works if you unlock the key before starting the release script by running
+gpg separately before the script.
+A better way to handle passphrases without changing the TTLs is to preset the passphrase,
+which avoids using pinentry mechanism completely, and will be reset on logout.
+
+# Find the "gpg-preset-passphrase" program. It is not on the PATH by default.
+$ find / -name gpg-preset-passphrase
+# Make sure you have the "allow-preset-passphrase" line  in your $HOME/.gnupg/gpg-agent.conf
+# Restart gpg
+$ gpgconf --kill all && gpg-connect-agent /bye
+# List your keys with key grip
+$ gpg --with-keygrip --list-secret-keys
+# Preset the passphrase for your signing key
+# </full/path/to/>/gpg-preset-passphrase -P <the passphrase> -c <the keygrip>
+# Check that the passphrase is successfully preset. There should be a '1' at the fourth position
+# after the keygrip for your key in the output for the signing key
+$ gpg-connect-agent 'keyinfo --list' /bye
+# Run the release script (see above)
+# Restart the gpg agent again to make sure it forgets the preset passphrase
+$ gpgconf --kill all && gpg-connect-agent /bye
+
 Running a build on GCE is easy enough. Here are some notes if of use.
 Create an instance. 4CPU/15G/10G disk seems to work well enough.
 Once up, run the below to make your machine fit for RC building:
@@ -106,6 +128,9 @@ $ scp ~/gpg.example.apache.pub example.gce.host:
 #   gpg-agent's extra socket (this will restrict what commands the remote node is allowed to have
 #   your agent handle. Note that the gpg guide above can help you set this up in your ssh config
 #   rather than typing it in ssh like this every time.
+# Note that as of maven-gpg-plugin 3.0.1, with gnupg >= 2.1, the plugin uses
+#   `--pinentry-mode error`, which is apparently not supported over the `extra` socket. These
+#   instructions may require tweaking.
 $ ssh -i ~/.ssh/my_id \
     -R "/run/user/1000/gnupg/S.gpg-agent:$(gpgconf --list-dir agent-extra-socket)" \
     -R "/run/user/1000/gnupg/S.gpg-agent.extra:$(gpgconf --list-dir agent-extra-socket)" \

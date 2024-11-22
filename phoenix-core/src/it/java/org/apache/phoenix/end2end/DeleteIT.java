@@ -225,7 +225,7 @@ public class DeleteIT extends ParallelStatsDisabledIT {
         if (createIndex) {
             if (local) {
                 conn.createStatement().execute("CREATE LOCAL INDEX IF NOT EXISTS " + localIndexName + " ON " + tableName + "(j)");
-                indexInUse = tableName;
+                indexInUse = localIndexName + "(" + tableName + ")";
             } else {
                 conn.createStatement().execute("CREATE INDEX IF NOT EXISTS " + indexName + " ON " + tableName + "(j)");
             }
@@ -1056,7 +1056,7 @@ public class DeleteIT extends ParallelStatsDisabledIT {
             DeleteStatement deleteStmt = (DeleteStatement) parser.parseStatement();
             DeleteCompiler compiler = new DeleteCompiler(stmt, null);
             MutationPlan plan = compiler.compile(deleteStmt);
-            assertEquals(plan.getClass(), planClass);
+            assertEquals(planClass, plan.getClass());
         }
     }
     private void createAndUpsertTable(String tableName, String indexName, Properties props,

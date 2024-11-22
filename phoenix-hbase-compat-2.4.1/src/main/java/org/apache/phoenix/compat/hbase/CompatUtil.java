@@ -1,11 +1,10 @@
 /*
- * Licensed to the Apache Software Foundation (ASF) under one
- * or more contributor license agreements.  See the NOTICE file
- * distributed with this work for additional information
- * regarding copyright ownership.  The ASF licenses this file
- * to you under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance
- * with the License.  You may obtain a copy of the License at
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to you under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
  *
  * http://www.apache.org/licenses/LICENSE-2.0
  *
@@ -17,39 +16,33 @@
  */
 package org.apache.phoenix.compat.hbase;
 
+import java.io.IOException;
+import java.util.List;
+
 import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.hbase.Cell;
 import org.apache.hadoop.hbase.CellComparator;
-import org.apache.hadoop.hbase.CellComparatorImpl;
 import org.apache.hadoop.hbase.MetaTableAccessor;
-import org.apache.hadoop.hbase.RegionMetrics;
-import org.apache.hadoop.hbase.ServerName;
-import org.apache.hadoop.hbase.TableName;
-import org.apache.hadoop.hbase.client.Admin;
 import org.apache.hadoop.hbase.client.Connection;
-import org.apache.hadoop.hbase.client.Scan;
-import org.apache.hadoop.hbase.exceptions.DeserializationException;
+import org.apache.hadoop.hbase.client.RegionInfo;
+import org.apache.hadoop.hbase.coprocessor.RegionCoprocessorEnvironment;
 import org.apache.hadoop.hbase.io.compress.Compression.Algorithm;
 import org.apache.hadoop.hbase.io.encoding.DataBlockEncoding;
 import org.apache.hadoop.hbase.io.hfile.HFileContext;
 import org.apache.hadoop.hbase.io.hfile.HFileContextBuilder;
-import org.apache.hadoop.hbase.regionserver.HStore;
-import org.apache.hadoop.hbase.regionserver.StoreFileWriter;
 import org.apache.hadoop.hbase.regionserver.StoreUtils;
-import org.apache.hadoop.hbase.security.access.Permission;
-import org.apache.hadoop.hbase.security.access.PermissionStorage;
 import org.apache.hadoop.hbase.util.ChecksumType;
-import org.apache.hbase.thirdparty.com.google.common.collect.ListMultimap;
+import org.apache.hadoop.hbase.util.VersionInfo;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
-import java.io.IOException;
 
 
 public class CompatUtil {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(
         CompatUtil.class);
+
+    private static boolean hasFixedShortCircuitConnection =
+            VersionInfo.compareVersion(VersionInfo.getVersion(), "2.4.12") >= 0;
 
     private CompatUtil() {
         //Not to be instantiated
@@ -67,8 +60,9 @@ public class CompatUtil {
             .build();
     }
 
-    public static Scan getScanForTableName(Connection conn, TableName tableName) {
-        return MetaTableAccessor.getScanForTableName(conn.getConfiguration(), tableName);
+    public static List<RegionInfo> getMergeRegions(Connection conn, RegionInfo regionInfo)
+            throws IOException {
+        return MetaTableAccessor.getMergeRegions(conn, regionInfo.getRegionName());
     }
 
     public static ChecksumType getChecksumType(Configuration conf) {
@@ -79,4 +73,12 @@ public class CompatUtil {
         return StoreUtils.getBytesPerChecksum(conf);
     }
 
+    public static Connection createShortCircuitConnection(final Configuration configuration,
+            final RegionCoprocessorEnvironment env) throws IOException {
+        if (hasFixedShortCircuitConnection) {
+            return env.createConnection(configuration);
+        } else {
+            return org.apache.hadoop.hbase.client.ConnectionFactory.createConnection(configuration);
+        }
+    }
 }

@@ -41,6 +41,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Properties;
 import java.util.Random;
+import java.util.regex.Pattern;
 
 import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.HRegionLocation;
@@ -50,7 +51,7 @@ import org.apache.phoenix.compile.ExplainPlan;
 import org.apache.phoenix.compile.ExplainPlanAttributes;
 import org.apache.phoenix.jdbc.PhoenixPreparedStatement;
 import org.apache.phoenix.thirdparty.com.google.common.collect.Lists;
-import org.apache.hadoop.hbase.client.HBaseAdmin;
+import org.apache.hadoop.hbase.client.Admin;
 import org.apache.hadoop.hbase.client.Result;
 import org.apache.hadoop.hbase.client.ResultScanner;
 import org.apache.hadoop.hbase.client.Scan;
@@ -59,7 +60,6 @@ import org.apache.hadoop.hbase.coprocessor.RegionCoprocessorEnvironment;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.hadoop.mapreduce.Job;
 import org.apache.phoenix.coprocessor.UngroupedAggregateRegionObserver;
-import org.apache.phoenix.end2end.NeedsOwnMiniClusterTest;
 import org.apache.phoenix.jdbc.PhoenixConnection;
 import org.apache.phoenix.jdbc.PhoenixDatabaseMetaData;
 import org.apache.phoenix.query.BaseTest;
@@ -75,7 +75,6 @@ import org.apache.phoenix.transaction.TransactionFactory;
 import org.apache.phoenix.util.MetaDataUtil;
 import org.apache.phoenix.util.PhoenixRuntime;
 import org.apache.phoenix.util.PropertiesUtil;
-import org.apache.phoenix.util.QueryUtil;
 import org.apache.phoenix.util.ReadOnlyProps;
 import org.apache.phoenix.util.SchemaUtil;
 import org.apache.phoenix.util.TestUtil;
@@ -83,7 +82,6 @@ import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.Ignore;
 import org.junit.Test;
-import org.junit.experimental.categories.Category;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
 import org.slf4j.Logger;
@@ -225,9 +223,9 @@ public abstract class BaseStatsCollectorIT extends BaseTest {
         try {
             int status = tool.run(cmdArgs);
             assertEquals("MR Job should complete successfully", 0, status);
-            HBaseAdmin hBaseAdmin = utility.getHBaseAdmin();
+            Admin hBaseAdmin = utility.getAdmin();
             assertEquals("Snapshot should be automatically deleted when UpdateStatisticsTool has completed",
-                    0, hBaseAdmin.listSnapshots(tool.getSnapshotName()).size());
+                    0, hBaseAdmin.listSnapshots(Pattern.compile(tool.getSnapshotName())).size());
         } catch (Exception e) {
             fail("Exception when running UpdateStatisticsTool for " + tableName + " Exception: " + e);
         } finally {
@@ -264,7 +262,8 @@ public abstract class BaseStatsCollectorIT extends BaseTest {
         assertEquals("PARALLEL 1-WAY", planAttributes.getIteratorTypeAndScanSize());
         assertEquals("FULL SCAN ", planAttributes.getExplainScanType());
         assertEquals(physicalTableName, planAttributes.getTableName());
-        assertEquals("SERVER FILTER BY FIRST KEY ONLY", planAttributes.getServerWhereFilter());
+        assertEquals("SERVER FILTER BY " + (columnEncoded ? "FIRST KEY ONLY" :
+                "EMPTY COLUMN ONLY"), planAttributes.getServerWhereFilter());
         conn.close();
     }
 
@@ -579,6 +578,9 @@ public abstract class BaseStatsCollectorIT extends BaseTest {
                         + "(k VARCHAR PRIMARY KEY, a.v INTEGER, b.v INTEGER, c.v INTEGER NULL, d.v INTEGER NULL) "
                         + tableDDLOptions );
         stmt = conn.prepareStatement("UPSERT INTO " + fullTableName + " VALUES(?,?, ?, ?, ?)");
+        int queryTimeout = conn.unwrap(PhoenixConnection.class).getQueryServices().getProps()
+                .getInt(QueryServices.THREAD_TIMEOUT_MS_ATTRIB,
+                        QueryServicesOptions.DEFAULT_THREAD_TIMEOUT_MS);
         byte[] val = new byte[250];
         for (int i = 0; i < nRows; i++) {
             stmt.setString(1, Character.toString((char)('a' + i)) + Bytes.toString(val));
@@ -621,7 +623,8 @@ public abstract class BaseStatsCollectorIT extends BaseTest {
         assertEquals(physicalTableName, planAttributes.getTableName());
 
         ConnectionQueryServices services = conn.unwrap(PhoenixConnection.class).getQueryServices();
-        List<HRegionLocation> regions = services.getAllTableRegions(Bytes.toBytes(physicalTableName));
+        List<HRegionLocation> regions =
+                services.getAllTableRegions(Bytes.toBytes(physicalTableName), queryTimeout);
         assertEquals(1, regions.size());
 
         collectStatistics(conn, fullTableName, Long.toString(1000));

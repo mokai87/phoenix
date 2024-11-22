@@ -54,7 +54,7 @@ import org.apache.hadoop.hbase.util.Bytes;
 import org.apache.phoenix.compile.JoinCompiler.JoinTable;
 import org.apache.phoenix.compile.JoinCompiler.Table;
 import org.apache.phoenix.compile.OrderByCompiler.OrderBy;
-import org.apache.phoenix.coprocessor.BaseScannerRegionObserver;
+import org.apache.phoenix.coprocessorclient.BaseScannerRegionObserverConstants;
 import org.apache.phoenix.exception.SQLExceptionCode;
 import org.apache.phoenix.execute.AggregatePlan;
 import org.apache.phoenix.execute.ClientAggregatePlan;
@@ -74,11 +74,13 @@ import org.apache.phoenix.execute.UnnestArrayPlan;
 import org.apache.phoenix.execute.visitor.QueryPlanVisitor;
 import org.apache.phoenix.expression.Expression;
 import org.apache.phoenix.expression.LiteralExpression;
+import org.apache.phoenix.expression.OrderByExpression;
 import org.apache.phoenix.expression.aggregator.Aggregator;
 import org.apache.phoenix.expression.aggregator.CountAggregator;
 import org.apache.phoenix.expression.aggregator.ServerAggregators;
 import org.apache.phoenix.expression.function.TimeUnit;
 import org.apache.phoenix.filter.EncodedQualifiersColumnProjectionFilter;
+import org.apache.phoenix.iterate.MergeSortTopNResultIterator;
 import org.apache.phoenix.jdbc.PhoenixConnection;
 import org.apache.phoenix.jdbc.PhoenixPreparedStatement;
 import org.apache.phoenix.jdbc.PhoenixStatement;
@@ -99,6 +101,7 @@ import org.apache.phoenix.schema.types.PChar;
 import org.apache.phoenix.schema.types.PDecimal;
 import org.apache.phoenix.schema.types.PInteger;
 import org.apache.phoenix.schema.types.PVarchar;
+import org.apache.phoenix.thirdparty.com.google.common.collect.Lists;
 import org.apache.phoenix.util.ByteUtil;
 import org.apache.phoenix.util.EnvironmentEdgeManager;
 import org.apache.phoenix.util.PhoenixRuntime;
@@ -110,8 +113,6 @@ import org.apache.phoenix.util.TestUtil;
 import org.junit.Before;
 import org.junit.Ignore;
 import org.junit.Test;
-
-import org.apache.phoenix.thirdparty.com.google.common.collect.Lists;
 
 
 
@@ -559,7 +560,7 @@ public class QueryCompilerTest extends BaseConnectionlessQueryTest {
         List<Object> binds = Collections.emptyList();
         for (String query : queries) {
             QueryPlan plan = getQueryPlan(query, binds);
-            assertEquals(query, BaseScannerRegionObserver.KEY_ORDERED_GROUP_BY_EXPRESSIONS, plan.getGroupBy().getScanAttribName());
+            assertEquals(query, BaseScannerRegionObserverConstants.KEY_ORDERED_GROUP_BY_EXPRESSIONS, plan.getGroupBy().getScanAttribName());
         }
     }
 
@@ -743,7 +744,7 @@ public class QueryCompilerTest extends BaseConnectionlessQueryTest {
         List<Object> binds = Collections.emptyList();
         for (String query : queries) {
             QueryPlan plan = getQueryPlan(query, binds);
-            assertEquals(plan.getGroupBy().getScanAttribName(), BaseScannerRegionObserver.UNORDERED_GROUP_BY_EXPRESSIONS);
+            assertEquals(plan.getGroupBy().getScanAttribName(), BaseScannerRegionObserverConstants.UNORDERED_GROUP_BY_EXPRESSIONS);
         }
     }
     
@@ -780,7 +781,7 @@ public class QueryCompilerTest extends BaseConnectionlessQueryTest {
             for (int i = 0; i < queries.length; i++) {
                 query = queries[i];
                 Scan scan = compileQuery(query, binds);
-                ServerAggregators aggregators = ServerAggregators.deserialize(scan.getAttribute(BaseScannerRegionObserver.AGGREGATORS), null, null);
+                ServerAggregators aggregators = ServerAggregators.deserialize(scan.getAttribute(BaseScannerRegionObserverConstants.AGGREGATORS), null, null);
                 Aggregator aggregator = aggregators.getAggregators()[0];
                 assertTrue(aggregator instanceof CountAggregator);
             }
@@ -2072,8 +2073,11 @@ public class QueryCompilerTest extends BaseConnectionlessQueryTest {
             String query = "SELECT f1.*, v4 FROM t";
             ResultSetMetaData rsMeta = statement.executeQuery(query).getMetaData();
             assertEquals("V1", rsMeta.getColumnName(1));
+            assertEquals("V1", rsMeta.getColumnLabel(1));
             assertEquals("V2", rsMeta.getColumnName(2));
+            assertEquals("V2", rsMeta.getColumnLabel(2));
             assertEquals("V4", rsMeta.getColumnName(3));
+            assertEquals("V4", rsMeta.getColumnLabel(3));
         } finally {
             statement.execute("DROP TABLE IF EXISTS t");
             conn.close();
@@ -2092,7 +2096,10 @@ public class QueryCompilerTest extends BaseConnectionlessQueryTest {
             String query = "SELECT f1.*, v4 FROM s.t";
             ResultSetMetaData rsMeta = statement.executeQuery(query).getMetaData();
             assertEquals("V1", rsMeta.getColumnName(1));
+            assertEquals("V1", rsMeta.getColumnLabel(1));
             assertEquals("V2", rsMeta.getColumnName(2));
+            assertEquals("V2", rsMeta.getColumnLabel(2));
+            assertEquals("V4", rsMeta.getColumnLabel(3));
             assertEquals("V4", rsMeta.getColumnName(3));
         } finally {
             statement.execute("DROP TABLE IF EXISTS s.t");
@@ -2454,7 +2461,7 @@ public class QueryCompilerTest extends BaseConnectionlessQueryTest {
             Scan scan = projectQuery("select A.i1 from X group by i1 order by avg(B.i2) " +
                     "desc");
             ServerAggregators aggregators = ServerAggregators.deserialize(scan.getAttribute
-                    (BaseScannerRegionObserver.AGGREGATORS), null, null);
+                    (BaseScannerRegionObserverConstants.AGGREGATORS), null, null);
             assertEquals(2,aggregators.getAggregatorCount());
         } finally {
             conn.close();
@@ -2508,19 +2515,19 @@ public class QueryCompilerTest extends BaseConnectionlessQueryTest {
             rs = conn.createStatement().executeQuery("EXPLAIN "+query);
             explainPlan = QueryUtil.getExplainPlan(rs);
             assertEquals("CLIENT PARALLEL 1-WAY FULL SCAN OVER T3\n" + 
-                    "    SERVER FILTER BY FIRST KEY ONLY\n" + 
+                    "    SERVER FILTER BY FIRST KEY ONLY\n" +
                     "    PARALLEL INNER-JOIN TABLE 0\n" + 
                     "        CLIENT PARALLEL 1-WAY RANGE SCAN OVER IDX ['foobar']\n" + 
-                    "            SERVER FILTER BY FIRST KEY ONLY\n" + 
+                    "            SERVER FILTER BY FIRST KEY ONLY\n" +
                     "    DYNAMIC SERVER FILTER BY B.J IN (\"A.:K\")",explainPlan);
             query = "SELECT a.k,b.k from t2 b join t1 a ON a.k = b.k where a.col1 || a.col2 = 'foobar'";
             rs = conn.createStatement().executeQuery("EXPLAIN "+query);
             explainPlan = QueryUtil.getExplainPlan(rs);
             assertEquals("CLIENT PARALLEL 1-WAY FULL SCAN OVER T2\n" + 
-                    "    SERVER FILTER BY FIRST KEY ONLY\n" + 
+                    "    SERVER FILTER BY FIRST KEY ONLY\n" +
                     "    PARALLEL INNER-JOIN TABLE 0\n" + 
                     "        CLIENT PARALLEL 1-WAY RANGE SCAN OVER IDX ['foobar']\n" + 
-                    "            SERVER FILTER BY FIRST KEY ONLY\n" + 
+                    "            SERVER FILTER BY FIRST KEY ONLY\n" +
                     "    DYNAMIC SERVER FILTER BY B.K IN (\"A.:K\")",explainPlan);
         } finally {
             conn.close();
@@ -2557,7 +2564,8 @@ public class QueryCompilerTest extends BaseConnectionlessQueryTest {
             ScanRanges ranges=plan.getContext().getScanRanges();
 
             List<HRegionLocation> regionLocations=
-                    conn.getQueryServices().getAllTableRegions(Bytes.toBytes("SALT_TEST2900"));
+                    conn.getQueryServices().getAllTableRegions(Bytes.toBytes("SALT_TEST2900"),
+                            60000);
             for (HRegionLocation regionLocation : regionLocations) {
                 assertTrue(ranges.intersectRegion(regionLocation.getRegion().getStartKey(),
                     regionLocation.getRegion().getEndKey(), false));
@@ -4949,12 +4957,12 @@ public class QueryCompilerTest extends BaseConnectionlessQueryTest {
             QueryPlan plan = stmt.optimizeQuery(query);
             plan.iterator();
             //Fail since we have 3 rows in pointLookup
-            assertFalse(plan.getContext().getScan().isSmall());
+            assertEquals(Scan.ReadType.DEFAULT, plan.getContext().getScan().getReadType());
             query = "select * from foo where a = 'a' and b = 'b' and c = 'c'";
             plan = stmt.compileQuery(query);
             plan.iterator();
             //Should be small scan, query is for single row pointLookup
-            assertTrue(plan.getContext().getScan().isSmall());
+            assertEquals(Scan.ReadType.PREAD, plan.getContext().getScan().getReadType());
         }
     }
 
@@ -6856,7 +6864,6 @@ public class QueryCompilerTest extends BaseConnectionlessQueryTest {
                     "(SELECT 1 FROM " + orderTableName + " o  where o.price > 8) ORDER BY name";
             queryPlan= TestUtil.getOptimizeQueryPlanNoIterator(conn, sql);
             assertTrue(queryPlan instanceof HashJoinPlan);
-            System.out.println(queryPlan.getStatement());
             TestUtil.assertSelectStatement(
                     queryPlan.getStatement(),
                     "SELECT ITEM_ID,NAME FROM ITEM_TABLE I  WHERE  EXISTS (SELECT 1 FROM ORDER_TABLE O  WHERE O.PRICE > 8 LIMIT 1) ORDER BY NAME");
@@ -6887,4 +6894,884 @@ public class QueryCompilerTest extends BaseConnectionlessQueryTest {
         }
     }
 
+    @Test
+    public void testEliminateUnnecessaryReversedScanBug6798() throws Exception {
+        Connection conn = null;
+        try {
+            conn = DriverManager.getConnection(getUrl());
+            String tableName = generateUniqueName();
+
+            String sql =
+                    "create table " + tableName + "(group_id integer not null, "
+                            + " keyword varchar not null, " + " cost integer, "
+                            + " CONSTRAINT TEST_PK PRIMARY KEY (group_id,keyword)) ";
+            conn.createStatement().execute(sql);
+
+            /**
+             * Test {@link GroupBy#isOrderPreserving} is false and {@link OrderBy} is reversed.
+             */
+            sql =
+                    "select keyword,sum(cost) from " + tableName
+                            + " group by keyword order by keyword desc";
+            QueryPlan queryPlan = TestUtil.getOptimizeQueryPlan(conn, sql);
+            Scan scan = queryPlan.getContext().getScan();
+            assertTrue(!queryPlan.getGroupBy().isOrderPreserving());
+            assertTrue(queryPlan.getOrderBy() == OrderBy.REV_ROW_KEY_ORDER_BY);
+            assertTrue(!ScanUtil.isReversed(scan));
+
+            /**
+             * Test {@link GroupBy#isOrderPreserving} is true and {@link OrderBy} is reversed.
+             */
+            sql =
+                    "select keyword,sum(cost) from " + tableName
+                            + " group by group_id,keyword order by group_id desc,keyword desc";
+            queryPlan = TestUtil.getOptimizeQueryPlan(conn, sql);
+            scan = queryPlan.getContext().getScan();
+            assertTrue(queryPlan.getGroupBy().isOrderPreserving());
+            assertTrue(queryPlan.getOrderBy() == OrderBy.REV_ROW_KEY_ORDER_BY);
+            assertTrue(ScanUtil.isReversed(scan));
+        } finally {
+            conn.close();
+        }
+    }
+
+    @Test
+    public void testReverseIndexRangeBugPhoenix6916() throws Exception {
+        String tableName = generateUniqueName();
+        String indexName = generateUniqueName();
+        try (Connection conn = DriverManager.getConnection(getUrl());
+                Statement stmt = conn.createStatement()) {
+            stmt.execute("create table " + tableName + " (id varchar primary key, ts timestamp)");
+            stmt.execute("create index " + indexName + " on " + tableName + "(ts desc)");
+
+            String query =
+                    "select id, ts from " + tableName
+                            + " where ts >= TIMESTAMP '2023-02-23 13:30:00'  and ts < TIMESTAMP '2023-02-23 13:40:00'";
+            ResultSet rs = stmt.executeQuery("EXPLAIN " + query);
+            String explainPlan = QueryUtil.getExplainPlan(rs);
+            assertEquals("CLIENT PARALLEL 1-WAY RANGE SCAN OVER " + indexName
+                    + " [~1,677,159,600,000] - [~1,677,159,000,000]\n    SERVER FILTER BY FIRST KEY ONLY",
+                explainPlan);
+        }
+    }
+
+    @Test
+    public void testReverseVarLengthRange6916() throws Exception {
+        String tableName = generateUniqueName();
+        try (Connection conn = DriverManager.getConnection(getUrl());
+                Statement stmt = conn.createStatement()) {
+
+            stmt.execute("create table " + tableName + " (k varchar primary key desc)");
+
+            // Explain doesn't display open/closed ranges
+            String explainExpected =
+                    "CLIENT PARALLEL 1-WAY RANGE SCAN OVER " + tableName
+                            + " [~'aaa'] - [~'a']\n    SERVER FILTER BY FIRST KEY ONLY";
+
+            String openQry = "select * from " + tableName + " where k > 'a' and k<'aaa'";
+            Scan openScan =
+                    getOptimizedQueryPlan(openQry, Collections.emptyList()).getContext().getScan();
+            assertEquals("\\x9E\\x9E\\x9F\\x00", Bytes.toStringBinary(openScan.getStartRow()));
+            assertEquals("\\x9E\\xFF", Bytes.toStringBinary(openScan.getStopRow()));
+            ResultSet rs = stmt.executeQuery("EXPLAIN " + openQry);
+            String explainPlan = QueryUtil.getExplainPlan(rs);
+            assertEquals(explainExpected, explainPlan);
+
+            String closedQry = "select * from " + tableName + " where k >= 'a' and k <= 'aaa'";
+            Scan closedScan =
+                    getOptimizedQueryPlan(closedQry, Collections.emptyList()).getContext()
+                            .getScan();
+            assertEquals("\\x9E\\x9E\\x9E\\xFF", Bytes.toStringBinary(closedScan.getStartRow()));
+            assertEquals("\\x9F\\x00", Bytes.toStringBinary(closedScan.getStopRow()));
+            rs = stmt.executeQuery("EXPLAIN " + closedQry);
+            explainPlan = QueryUtil.getExplainPlan(rs);
+            assertEquals(explainExpected, explainPlan);
+        }
+    }
+
+    @Test
+    public void testUncoveredPhoenix6969() throws Exception {
+
+        try (Connection conn = DriverManager.getConnection(getUrl());
+                Statement stmt = conn.createStatement()) {
+
+            stmt.execute(
+                "create table dd (k1 integer not null, k2 integer not null, k3 integer not null,"
+                + " k4 integer not null, v1 integer, v2 integer, v3 integer, v4 integer"
+                + " constraint pk primary key (k1,k2,k3,k4))");
+            stmt.execute("create index ii on dd (k4, k1, k2, k3)");
+            String query =
+                    "select /*+ index(dd ii) */ k1, k2, k3, k4, v1, v2, v3, v4 from dd"
+                    + " where k4=1 and k2=1 order by k1 asc, v1 asc limit  1";
+            ResultSet rs = stmt.executeQuery("EXPLAIN " + query);
+            String explainPlan = QueryUtil.getExplainPlan(rs);
+            //We are more interested in the query compiling than the exact result
+            assertEquals("CLIENT PARALLEL 1-WAY RANGE SCAN OVER II [1]\n"
+                    + "    SERVER MERGE [0.V1, 0.V2, 0.V3, 0.V4]\n"
+                    + "    SERVER FILTER BY FIRST KEY ONLY AND \"K2\" = 1\n"
+                    + "    SERVER TOP 1 ROW SORTED BY [\"K1\", \"V1\"]\n"
+                    + "CLIENT MERGE SORT\n"
+                    + "CLIENT LIMIT 1", explainPlan);
+        }
+    }
+
+    @Test
+    public void testUncoveredPhoenix6984() throws Exception {
+        try (Connection conn = DriverManager.getConnection(getUrl());
+                Statement stmt = conn.createStatement()) {
+            stmt.execute("CREATE TABLE D (\n" + "K1 CHAR(6) NOT NULL,\n"
+                    + "K2 VARCHAR(22) NOT NULL,\n"
+                    + "K3 CHAR(2) NOT NULL,\n"
+                    + "K4 VARCHAR(36) NOT NULL,\n"
+                    + "V1 TIMESTAMP,\n"
+                    + "V2 TIMESTAMP,\n"
+                    + "CONSTRAINT PK_BILLING_ORDER PRIMARY KEY (K1,K2,K3,K4))");
+
+            stmt.execute("CREATE INDEX I ON D(K2, K1, K3, K4)");
+            String query =
+                    "SELECT /*+ INDEX(D I), NO_INDEX_SERVER_MERGE */ * "
+                            + "FROM D "
+                            + "WHERE K2 = 'XXX' AND "
+                            + "V2 >= TIMESTAMP '2023-05-31 23:59:59.000' AND "
+                            + "V1 <= TIMESTAMP '2023-04-01 00:00:00.000' "
+                            + "ORDER BY V2 asc";
+            ResultSet rs = stmt.executeQuery("EXPLAIN " + query);
+            String explainPlan = QueryUtil.getExplainPlan(rs);
+            assertEquals("CLIENT PARALLEL 1-WAY FULL SCAN OVER D\n"
+                    + "    SERVER FILTER BY (V2 >= TIMESTAMP '2023-05-31 23:59:59.000'"
+                    + " AND V1 <= TIMESTAMP '2023-04-01 00:00:00.000')\n"
+                    + "    SERVER SORTED BY [D.V2]\n"
+                    + "CLIENT MERGE SORT\n"
+                    + "    SKIP-SCAN-JOIN TABLE 0\n"
+                    + "        CLIENT PARALLEL 1-WAY RANGE SCAN OVER I ['XXX']\n"
+                    + "            SERVER FILTER BY FIRST KEY ONLY\n"
+                    + "    DYNAMIC SERVER FILTER BY (\"D.K1\", \"D.K2\", \"D.K3\", \"D.K4\")"
+                    + " IN (($2.$4, $2.$5, $2.$6, $2.$7))",
+                explainPlan);
+        }
+    }
+
+    @Test
+    public void testUncoveredPhoenix6986() throws Exception {
+        Properties props = new Properties();
+        props.setProperty(QueryServices.SERVER_MERGE_FOR_UNCOVERED_INDEX,
+            Boolean.toString(false));
+        try (Connection conn = DriverManager.getConnection(getUrl(), props);
+            Statement stmt = conn.createStatement()) {
+            stmt.execute("CREATE TABLE TAB_PHOENIX_6986 (\n" + "K1 CHAR(6) NOT NULL,\n"
+                + "K2 VARCHAR(22) NOT NULL,\n"
+                + "K3 CHAR(2) NOT NULL,\n"
+                + "K4 VARCHAR(36) NOT NULL,\n"
+                + "V1 TIMESTAMP,\n"
+                + "V2 TIMESTAMP,\n"
+                + "CONSTRAINT PK_PHOENIX_6986 PRIMARY KEY (K1,K2,K3,K4))");
+
+            stmt.execute("CREATE INDEX IDX_PHOENIX_6986 ON TAB_PHOENIX_6986(K2, K1, K3, K4)");
+            String query =
+                "SELECT /*+ INDEX(TAB_PHOENIX_6986 IDX_PHOENIX_6986) */ * "
+                    + "FROM TAB_PHOENIX_6986 "
+                    + "WHERE K2 = 'XXX' AND "
+                    + "V2 >= TIMESTAMP '2023-05-31 23:59:59.000' AND "
+                    + "V1 <= TIMESTAMP '2023-04-01 00:00:00.000' "
+                    + "ORDER BY V2 asc";
+            ResultSet rs = stmt.executeQuery("EXPLAIN " + query);
+            String explainPlan = QueryUtil.getExplainPlan(rs);
+            assertEquals("CLIENT PARALLEL 1-WAY FULL SCAN OVER TAB_PHOENIX_6986\n"
+                    + "    SERVER FILTER BY (V2 >= TIMESTAMP '2023-05-31 23:59:59.000'"
+                    + " AND V1 <= TIMESTAMP '2023-04-01 00:00:00.000')\n"
+                    + "    SERVER SORTED BY [TAB_PHOENIX_6986.V2]\n"
+                    + "CLIENT MERGE SORT\n"
+                    + "    SKIP-SCAN-JOIN TABLE 0\n"
+                    + "        CLIENT PARALLEL 1-WAY RANGE SCAN OVER IDX_PHOENIX_6986 ['XXX']\n"
+                    + "            SERVER FILTER BY FIRST KEY ONLY\n"
+                    + "    DYNAMIC SERVER FILTER BY (\"TAB_PHOENIX_6986.K1\", \"TAB_PHOENIX_6986.K2\", \"TAB_PHOENIX_6986.K3\", \"TAB_PHOENIX_6986.K4\")"
+                    + " IN (($2.$4, $2.$5, $2.$6, $2.$7))",
+                explainPlan);
+        }
+    }
+
+    @Test
+    public void testUncoveredPhoenix6961() throws Exception {
+        try (Connection conn = DriverManager.getConnection(getUrl());
+                Statement stmt = conn.createStatement();) {
+            stmt.execute(
+                "create table d (k integer primary key, v1 integer, v2 integer, v3 integer, v4 integer)");
+            stmt.execute("create index i on d(v2) include (v3)");
+            String query = "select /*+ index(d i) */ * from d where v2=1 and v3=1";
+            ResultSet rs = stmt.executeQuery("EXPLAIN " + query);
+            String explainPlan = QueryUtil.getExplainPlan(rs);
+            assertEquals("CLIENT PARALLEL 1-WAY RANGE SCAN OVER I [1]\n"
+                    + "    SERVER MERGE [0.V1, 0.V4]\n"
+                    + "    SERVER FILTER BY \"V3\" = 1",
+                    explainPlan);
+        }
+    }
+
+    @Test
+    public void testPartialOrderForTupleProjectionWithJoinBug7352() throws Exception {
+        try (Connection conn = DriverManager.getConnection(getUrl())) {
+            String cpc_pv_dumper = generateUniqueName();
+            String sql = "create table " + cpc_pv_dumper + " ( "
+                    + " aid BIGINT not null,"
+                    + " k BIGINT  not null,"
+                    + " cm BIGINT, "
+                    + " CONSTRAINT TEST_PK PRIMARY KEY (aid, k))";
+            conn.createStatement().execute(sql);
+
+            String group_temp = generateUniqueName();
+            sql = "create table " + group_temp + " ("
+                    + "  aid BIGINT not null,"
+                    + "  gid TINYINT not null,"
+                    + " CONSTRAINT TEST_PK PRIMARY KEY (aid, gid))";
+            conn.createStatement().execute(sql);
+
+            sql = "select a_key, sum(groupCost) from ( "
+                    + " select t1.k as a_key, sum(t1.cm) as groupCost "
+                    + " from " + cpc_pv_dumper + " as t1 join " + group_temp + " as t2 on t1.aid = t2.aid group by t1.k, t2.gid" +
+                    ") group by a_key having count(1) >= 2 order by sum(groupCost) desc limit 100";
+            QueryPlan plan =  TestUtil.getOptimizeQueryPlanNoIterator(conn, sql);
+            assertTrue(plan.getGroupBy().isOrderPreserving());
+
+            sql = "select a_key, sum(groupCost) from ( "
+                    + " select t1.k as a_key, t2.gid as b_gid, sum(t1.cm) as groupCost "
+                    + " from " + cpc_pv_dumper + " as t1 join " + group_temp + " as t2 on t1.aid = t2.aid group by t1.k, t2.gid" +
+                    ") group by a_key having count(1) >= 2 order by sum(groupCost) desc limit 100";
+            plan =  TestUtil.getOptimizeQueryPlanNoIterator(conn, sql);
+            assertTrue(plan.getGroupBy().isOrderPreserving());
+
+            sql = "select b_gid, sum(groupCost) from ( "
+                    + " select t1.k as a_key, t2.gid as b_gid, sum(t1.cm) as groupCost "
+                    + " from " + cpc_pv_dumper + " as t1 join " + group_temp + " as t2 on t1.aid = t2.aid group by t1.k, t2.gid" +
+                    ") group by b_gid having count(1) >= 2 order by sum(groupCost) desc limit 100";
+            plan =  TestUtil.getOptimizeQueryPlanNoIterator(conn, sql);
+            assertFalse(plan.getGroupBy().isOrderPreserving());
+
+            sql = "select b_gid, a_key, groupCost from ( "
+                    + " select t1.k as a_key, t2.gid as b_gid, cast(sum(t1.cm) as bigint) as groupCost "
+                    + " from " + cpc_pv_dumper + " as t1 join " + group_temp
+                    + " as t2 on t1.aid = t2.aid group by t1.k, t2.gid, t2.aid order by sum(t1.cm), a_key, t2.aid desc limit 20" +
+                    ") order by groupCost";
+            ClientScanPlan clientScanPlan =  (ClientScanPlan)TestUtil.getOptimizeQueryPlanNoIterator(conn, sql);
+            assertTrue(clientScanPlan.getOrderBy() == OrderBy.FWD_ROW_KEY_ORDER_BY);
+            List<OrderBy> outputOrderBys = ((TupleProjectionPlan)(clientScanPlan.getDelegate())).getOutputOrderBys();
+            assertTrue(outputOrderBys.size() == 1);
+            OrderBy outputOrderBy = outputOrderBys.get(0);
+            assertTrue(outputOrderBy.getOrderByExpressions().size() == 2);
+            assertTrue(outputOrderBy.getOrderByExpressions().get(0).toString().equals("GROUPCOST"));
+            assertTrue(outputOrderBy.getOrderByExpressions().get(1).toString().equals("A_KEY"));
+
+            sql = "select b_gid, a_key, groupCost from ( "
+                    + " select t1.k as a_key, t2.gid as b_gid, cast(sum(t1.cm) as bigint) as groupCost "
+                    + " from " + cpc_pv_dumper + " as t1 join " + group_temp
+                    + " as t2 on t1.aid = t2.aid group by t1.k, t2.gid order by sum(t1.cm) desc, a_key asc limit 20" +
+                    ") order by groupCost desc";
+            clientScanPlan =  (ClientScanPlan)TestUtil.getOptimizeQueryPlanNoIterator(conn, sql);
+            assertTrue(clientScanPlan.getOrderBy() == OrderBy.FWD_ROW_KEY_ORDER_BY);
+            outputOrderBys = ((TupleProjectionPlan)(clientScanPlan.getDelegate())).getOutputOrderBys();
+            assertTrue(outputOrderBys.size() == 1);
+            outputOrderBy = outputOrderBys.get(0);
+            assertTrue(outputOrderBy.getOrderByExpressions().size() == 2);
+            assertTrue(outputOrderBy.getOrderByExpressions().get(0).toString().equals("GROUPCOST DESC"));
+            assertTrue(outputOrderBy.getOrderByExpressions().get(1).toString().equals("A_KEY"));
+
+            sql = "select b_gid, groupCost from ( "
+                    + " select t2.gid as b_gid, cast(sum(t1.cm) as bigint) as groupCost "
+                    + " from " + cpc_pv_dumper + " as t1 join " + group_temp
+                    + " as t2 on t1.aid = t2.aid group by t1.k, t2.gid order by sum(t1.cm), t1.k limit 20" +
+                    ") order by groupCost";
+            clientScanPlan =  (ClientScanPlan)TestUtil.getOptimizeQueryPlanNoIterator(conn, sql);
+            assertTrue(clientScanPlan.getOrderBy() == OrderBy.FWD_ROW_KEY_ORDER_BY);
+            outputOrderBys = ((TupleProjectionPlan)(clientScanPlan.getDelegate())).getOutputOrderBys();
+            assertTrue(outputOrderBys.size() == 1);
+            outputOrderBy = outputOrderBys.get(0);
+            assertTrue(outputOrderBy.getOrderByExpressions().size() == 1);
+            assertTrue(outputOrderBy.getOrderByExpressions().get(0).toString().equals("GROUPCOST"));
+        }
+    }
+
+    @Test
+    public void testPartialOrderForTupleProjectionPlanBug7352() throws Exception {
+        doTestPartialOrderForTupleProjectionPlanBug7352(false, false);
+        doTestPartialOrderForTupleProjectionPlanBug7352(false, true);
+        doTestPartialOrderForTupleProjectionPlanBug7352(true, false);
+        doTestPartialOrderForTupleProjectionPlanBug7352(true, true);
+    }
+
+    private void doTestPartialOrderForTupleProjectionPlanBug7352(boolean desc, boolean salted) throws Exception {
+        try (Connection conn = DriverManager.getConnection(getUrl())) {
+            String tableName = generateUniqueName();
+            String sql = "create table " + tableName + "( "+
+                    " pk1 char(20) not null , " +
+                    " pk2 char(20) not null, " +
+                    " pk3 char(20) not null," +
+                    " v1 varchar, " +
+                    " v2 varchar, " +
+                    " v3 varchar, " +
+                    " CONSTRAINT TEST_PK PRIMARY KEY ( " +
+                    " pk1 " + (desc ? "desc" : "")+", "+
+                    " pk2 " + (desc ? "desc" : "")+", "+
+                    " pk3 " + (desc ? "desc" : "")+
+                    " )) " + (salted ? "SALT_BUCKETS =4" : "");
+            conn.createStatement().execute(sql);
+
+            sql = "select pk3, v1, v2 from (select v1,v2,pk3 from " + tableName
+                    + " t where pk1 = '6' order by t.v2,t.v1 limit 10) a order by v2";
+            ClientScanPlan plan =  (ClientScanPlan)TestUtil.getOptimizeQueryPlan(conn, sql);
+            assertTrue(plan.getOrderBy() == OrderBy.FWD_ROW_KEY_ORDER_BY);
+            List<OrderBy> outputOrderBys = ((TupleProjectionPlan)(plan.getDelegate())).getOutputOrderBys();
+            assertTrue(outputOrderBys.size() == 1);
+            OrderBy outputOrderBy = outputOrderBys.get(0);
+            assertTrue(outputOrderBy.getOrderByExpressions().size() == 2);
+            assertTrue(outputOrderBy.getOrderByExpressions().get(0).toString().equals("V2"));
+            assertTrue(outputOrderBy.getOrderByExpressions().get(1).toString().equals("V1"));
+
+            sql = "select pk3, v1, v2 from (select v1,v2,pk3 from " + tableName
+                    + " t where pk1 = '6' order by t.v2 desc,t.v1 desc limit 10) a order by v2 desc";
+            plan =  (ClientScanPlan)TestUtil.getOptimizeQueryPlan(conn, sql);
+            assertTrue(plan.getOrderBy() == OrderBy.FWD_ROW_KEY_ORDER_BY);
+            outputOrderBys = ((TupleProjectionPlan)(plan.getDelegate())).getOutputOrderBys();
+            assertTrue(outputOrderBys.size() == 1);
+            outputOrderBy = outputOrderBys.get(0);
+            assertTrue(outputOrderBy.getOrderByExpressions().size() == 2);
+            assertTrue(outputOrderBy.getOrderByExpressions().get(0).toString().equals("V2 DESC"));
+            assertTrue(outputOrderBy.getOrderByExpressions().get(1).toString().equals("V1 DESC"));
+
+            sql = "select pk3, v1, v2 from (select v1,v2,pk3 from " + tableName
+                    + " t where pk1 = '6' order by t.v2 desc,t.v1 desc, t.v3 desc limit 10) a order by v2 desc";
+            plan =  (ClientScanPlan)TestUtil.getOptimizeQueryPlan(conn, sql);
+            assertTrue(plan.getOrderBy() == OrderBy.FWD_ROW_KEY_ORDER_BY);
+            outputOrderBys = ((TupleProjectionPlan)(plan.getDelegate())).getOutputOrderBys();
+            assertTrue(outputOrderBys.size() == 1);
+            outputOrderBy = outputOrderBys.get(0);
+            assertTrue(outputOrderBy.getOrderByExpressions().size() == 2);
+            assertTrue(outputOrderBy.getOrderByExpressions().get(0).toString().equals("V2 DESC"));
+            assertTrue(outputOrderBy.getOrderByExpressions().get(1).toString().equals("V1 DESC"));
+
+            sql = "select pk3, v1, v2 from (select v1,v2,pk3 from " + tableName
+                    + " t where pk1 = '6' order by t.v2 desc,t.v1 desc, t.v3 asc limit 10) a order by v2 desc";
+            plan =  (ClientScanPlan)TestUtil.getOptimizeQueryPlan(conn, sql);
+            assertTrue(plan.getOrderBy() == OrderBy.FWD_ROW_KEY_ORDER_BY);
+            outputOrderBys = ((TupleProjectionPlan)(plan.getDelegate())).getOutputOrderBys();
+            assertTrue(outputOrderBys.size() == 1);
+            outputOrderBy = outputOrderBys.get(0);
+            assertTrue(outputOrderBy.getOrderByExpressions().size() == 2);
+            assertTrue(outputOrderBy.getOrderByExpressions().get(0).toString().equals("V2 DESC"));
+            assertTrue(outputOrderBy.getOrderByExpressions().get(1).toString().equals("V1 DESC"));
+
+            sql = "select v2,cnt from (select count(pk3) cnt,v1,v2 from " + tableName
+                    + " t where pk1 = '6' group by t.v1,t.v2,t.v3 limit 10) a order by v1";
+            plan = (ClientScanPlan)TestUtil.getOptimizeQueryPlan(conn, sql);
+            assertTrue(plan.getOrderBy() == OrderBy.FWD_ROW_KEY_ORDER_BY);
+            outputOrderBys = ((TupleProjectionPlan)(plan.getDelegate())).getOutputOrderBys();
+            assertTrue(outputOrderBys.size() == 1);
+            outputOrderBy = outputOrderBys.get(0);
+            assertTrue(outputOrderBy.getOrderByExpressions().size() == 2);
+            assertTrue(outputOrderBy.getOrderByExpressions().get(0).toString().equals("V1"));
+            assertTrue(outputOrderBy.getOrderByExpressions().get(1).toString().equals("V2"));
+
+            sql = "select sub, pk2Cnt from (select substr(v2,0,2) sub,cast (count(pk3) as bigint) cnt, count(pk2) pk2Cnt from "
+                    + tableName
+                    + " t where pk1 = '6' group by t.v1 ,t.v2, t.v3 "
+                    + " order by count(pk3) desc,t.v2 desc,t.v3 desc limit 10) a order by cnt desc ,sub desc";
+            plan =   (ClientScanPlan)TestUtil.getOptimizeQueryPlan(conn, sql);
+            assertTrue(plan.getOrderBy() == OrderBy.FWD_ROW_KEY_ORDER_BY);
+            outputOrderBys = ((TupleProjectionPlan)(plan.getDelegate())).getOutputOrderBys();
+            assertTrue(outputOrderBys.size() == 1);
+            outputOrderBy = outputOrderBys.get(0);
+            assertTrue(outputOrderBy.getOrderByExpressions().size() == 2);
+            assertTrue(outputOrderBy.getOrderByExpressions().get(0).toString().equals("CNT DESC"));
+            assertTrue(outputOrderBy.getOrderByExpressions().get(1).toString().equals("SUB DESC"));
+
+            sql = "select sub, pk2Cnt from (select substr(v2,0,2) sub,cast (count(pk3) as bigint) cnt, count(pk2) pk2Cnt from "
+                    + tableName
+                    + " t where pk1 = '6' group by t.v1 ,t.v2, t.v3 "
+                    + " order by count(pk3) desc,t.v2 desc,t.v3 asc limit 10) a order by cnt desc ,sub desc";
+            plan =   (ClientScanPlan)TestUtil.getOptimizeQueryPlan(conn, sql);
+            assertTrue(plan.getOrderBy() == OrderBy.FWD_ROW_KEY_ORDER_BY);
+            outputOrderBys = ((TupleProjectionPlan)(plan.getDelegate())).getOutputOrderBys();
+            assertTrue(outputOrderBys.size() == 1);
+            outputOrderBy = outputOrderBys.get(0);
+            assertTrue(outputOrderBy.getOrderByExpressions().size() == 2);
+            assertTrue(outputOrderBy.getOrderByExpressions().get(0).toString().equals("CNT DESC"));
+            assertTrue(outputOrderBy.getOrderByExpressions().get(1).toString().equals("SUB DESC"));
+
+            sql = "select sub, pk2Cnt from (select substr(v2,0,2) sub,cast (count(pk3) as bigint) cnt, count(pk2) pk2Cnt from "
+                    + tableName
+                    + " t where pk1 = '6' group by t.v1 ,t.v2, t.v3 "
+                    + " order by t.v2 desc, count(pk3) desc, t.v3 desc limit 10) a order by sub desc, cnt desc";
+            plan =   (ClientScanPlan)TestUtil.getOptimizeQueryPlan(conn, sql);
+            assertTrue(plan.getOrderBy().getOrderByExpressions().size() == 2);
+            assertTrue(plan.getOrderBy().getOrderByExpressions().get(0).toString().equals("SUB DESC"));
+            assertTrue(plan.getOrderBy().getOrderByExpressions().get(1).toString().equals("CNT DESC"));
+            outputOrderBys = ((TupleProjectionPlan)(plan.getDelegate())).getOutputOrderBys();
+            assertTrue(outputOrderBys.size() == 1);
+            outputOrderBy = outputOrderBys.get(0);
+            assertTrue(outputOrderBy.getOrderByExpressions().size() == 1);
+            assertTrue(outputOrderBy.getOrderByExpressions().get(0).toString().equals("SUB DESC"));
+
+            sql = "select sub, pk2Cnt from (select substr(v2,0,2) sub,cast (count(pk3) as bigint) cnt, count(pk2) pk2Cnt from "
+                    + tableName
+                    + " t where pk1 = '6' group by v1 ,v2, v3 "
+                    + " order by t.v2 desc, count(pk3) desc, t.v3 asc limit 10) a order by sub desc, cnt desc";
+            plan =   (ClientScanPlan)TestUtil.getOptimizeQueryPlan(conn, sql);
+            assertTrue(plan.getOrderBy().getOrderByExpressions().size() == 2);
+            assertTrue(plan.getOrderBy().getOrderByExpressions().get(0).toString().equals("SUB DESC"));
+            assertTrue(plan.getOrderBy().getOrderByExpressions().get(1).toString().equals("CNT DESC"));
+            outputOrderBys = ((TupleProjectionPlan)(plan.getDelegate())).getOutputOrderBys();
+            assertTrue(outputOrderBys.size() == 1);
+            outputOrderBy = outputOrderBys.get(0);
+            assertTrue(outputOrderBy.getOrderByExpressions().size() == 1);
+            assertTrue(outputOrderBy.getOrderByExpressions().get(0).toString().equals("SUB DESC"));
+
+            sql = "select v1, pk3, v2 from (select v1,v2,pk3 from " + tableName
+                    + " t where pk1 = '6' order by t.v2, t.v1, t.v3 limit 10) a order by v1";
+            plan =  (ClientScanPlan)TestUtil.getOptimizeQueryPlan(conn, sql);
+            assertTrue(plan.getOrderBy().getOrderByExpressions().size() == 1);
+            assertTrue(plan.getOrderBy().getOrderByExpressions().get(0).toString().equals("V1"));
+
+            sql = "select pk3, pk1, pk2 from (select pk1,pk2,pk3 from " + tableName
+                    + " t where pk1 = '6' order by t.v2, t.v1, t.v3 limit 10) a order by pk3";
+            plan =  (ClientScanPlan)TestUtil.getOptimizeQueryPlan(conn, sql);
+            assertTrue(plan.getOrderBy().getOrderByExpressions().size() == 1);
+            assertTrue(plan.getOrderBy().getOrderByExpressions().get(0).toString().equals("PK3"));
+            outputOrderBys = ((TupleProjectionPlan)(plan.getDelegate())).getOutputOrderBys();
+            assertTrue(outputOrderBys.size() == 0);
+
+            sql = "select sub, v1 from (select substr(pk3,0,2) sub, pk2, v1 from "
+                    + tableName + " t where pk1 = '6' order by pk2, pk3 limit 10) a order by pk2 desc ,sub desc";
+            plan =   (ClientScanPlan)TestUtil.getOptimizeQueryPlan(conn, sql);
+            //Here because for subquery, there is no OrderBy REV_ROW_KEY_ORDER_BY
+            assertTrue(plan.getOrderBy().getOrderByExpressions().size() > 0);
+            outputOrderBys = ((TupleProjectionPlan)(plan.getDelegate())).getOutputOrderBys();
+            assertTrue(outputOrderBys.size() == 1);
+            outputOrderBy = outputOrderBys.get(0);
+            assertTrue(outputOrderBy.getOrderByExpressions().size() == 2);
+            if (desc) {
+                assertOrderByForDescExpression(outputOrderBy.getOrderByExpressions().get(0), "PK2", true, true);
+                assertOrderByForDescExpression(outputOrderBy.getOrderByExpressions().get(1), "SUB", true, true);
+            } else {
+                assertTrue(outputOrderBy.getOrderByExpressions().get(0).toString().equals("PK2"));
+                assertTrue(outputOrderBy.getOrderByExpressions().get(1).toString().equals("SUB"));
+            }
+
+            sql = "select sub, v1 from (select substr(pk3,0,2) sub, pk2, v1 from "
+                    + tableName + " t where pk1 = '6' order by pk2 desc, pk3 desc limit 10) a order by pk2 desc ,sub desc";
+            plan =   (ClientScanPlan)TestUtil.getOptimizeQueryPlan(conn, sql);
+            assertTrue(plan.getOrderBy() == OrderBy.FWD_ROW_KEY_ORDER_BY);
+            outputOrderBys = ((TupleProjectionPlan)(plan.getDelegate())).getOutputOrderBys();
+            assertTrue(outputOrderBys.size() == 1);
+            outputOrderBy = outputOrderBys.get(0);
+            assertTrue(outputOrderBy.getOrderByExpressions().size() == 2);
+            if (desc) {
+                assertOrderByForDescExpression(outputOrderBy.getOrderByExpressions().get(0), "PK2", false, false);
+                assertOrderByForDescExpression(outputOrderBy.getOrderByExpressions().get(1), "SUB", false, false);
+            } else {
+                assertTrue(outputOrderBy.getOrderByExpressions().get(0).toString().equals("PK2 DESC NULLS LAST"));
+                assertTrue(outputOrderBy.getOrderByExpressions().get(1).toString().equals("SUB DESC NULLS LAST"));
+            }
+
+            sql = "select sub, v1 from (select substr(pk2,0,2) sub, pk3, v1 from "
+                    + tableName + " t where pk1 = '6' order by pk2, pk3 limit 10) a order by sub desc ,pk3 desc";
+            plan =   (ClientScanPlan)TestUtil.getOptimizeQueryPlan(conn, sql);
+            //Here because for subquery, there is no OrderBy REV_ROW_KEY_ORDER_BY
+            assertTrue(plan.getOrderBy().getOrderByExpressions().size() > 0);
+            outputOrderBys = ((TupleProjectionPlan)(plan.getDelegate())).getOutputOrderBys();
+            assertTrue(outputOrderBys.size() == 1);
+            outputOrderBy = outputOrderBys.get(0);
+            assertTrue(outputOrderBy.getOrderByExpressions().size() == 1);
+            if (desc) {
+                assertOrderByForDescExpression(outputOrderBy.getOrderByExpressions().get(0), "SUB", true, true);
+            } else {
+                assertTrue(outputOrderBy.getOrderByExpressions().get(0).toString().equals("SUB"));
+            }
+
+            sql = "select sub, v1 from (select substr(pk2,0,2) sub, pk3, v1 from "
+                    + tableName + " t where pk1 = '6' order by pk2 desc, pk3 desc limit 10) a order by sub desc,pk3 desc";
+            plan =   (ClientScanPlan)TestUtil.getOptimizeQueryPlan(conn, sql);
+            assertTrue(plan.getOrderBy().getOrderByExpressions().size() > 0);
+            outputOrderBys = ((TupleProjectionPlan)(plan.getDelegate())).getOutputOrderBys();
+            assertTrue(outputOrderBys.size() == 1);
+            outputOrderBy = outputOrderBys.get(0);
+            assertTrue(outputOrderBy.getOrderByExpressions().size() == 1);
+            if (desc) {
+                assertOrderByForDescExpression(outputOrderBy.getOrderByExpressions().get(0), "SUB", false, false);
+            } else {
+                assertTrue(outputOrderBy.getOrderByExpressions().get(0).toString().equals("SUB DESC NULLS LAST"));
+            }
+        }
+    }
+
+    private static void assertOrderByForDescExpression(
+            OrderByExpression orderByExpression,
+            String strExpression,
+            boolean isNullsLast,
+            boolean isAscending) {
+        assertEquals(strExpression, orderByExpression.getExpression().toString());
+        assertEquals(isNullsLast, orderByExpression.isNullsLast());
+        assertEquals(isAscending, orderByExpression.isAscending());
+    }
+
+    @Test
+    public void testUnionAllOrderByOptimizeBug7397() throws Exception {
+        Properties props = new Properties();
+        props.setProperty(QueryServices.FORCE_ROW_KEY_ORDER_ATTRIB, Boolean.toString(false));
+        try (Connection conn = DriverManager.getConnection(getUrl(), props)) {
+            String tableName1 = generateUniqueName();
+            String sql1 = "create table " + tableName1 + "( "+
+                    " fuid UNSIGNED_LONG not null , " +
+                    " fstatsdate UNSIGNED_LONG not null, " +
+                    " fversion UNSIGNED_LONG not null," +
+                    " faid_1 UNSIGNED_LONG not null," +
+                    " clk_pv_1 UNSIGNED_LONG, " +
+                    " activation_pv_1 UNSIGNED_LONG, " +
+                    " CONSTRAINT TEST_PK PRIMARY KEY ( " +
+                    " fuid , " +
+                    " fstatsdate, " +
+                    " fversion, " +
+                    " faid_1 " +
+                    " ))";
+            conn.createStatement().execute(sql1);
+
+            String tableName2= generateUniqueName();
+            String sql2 = "create table " + tableName2 + "( "+
+                    " fuid UNSIGNED_LONG not null , " +
+                    " fstatsdate UNSIGNED_LONG not null, " +
+                    " fversion UNSIGNED_LONG not null," +
+                    " faid_2 UNSIGNED_LONG not null," +
+                    " clk_pv_2 UNSIGNED_LONG, " +
+                    " activation_pv_2 UNSIGNED_LONG, " +
+                    " CONSTRAINT TEST_PK PRIMARY KEY ( " +
+                    " fuid , " +
+                    " fstatsdate, " +
+                    " fversion," +
+                    " faid_2 " +
+                    " ))";
+            conn.createStatement().execute(sql2);
+
+            String orderedUnionSql =
+                    "(SELECT FUId AS advertiser_id,"
+                    + "   FAId_1 AS adgroup_id,"
+                    + "   FStatsDate AS date,"
+                    + "   SUM(clk_pv_1) AS valid_click_count,"
+                    + "   SUM(activation_pv_1) AS activated_count"
+                    + "  FROM " + tableName1
+                    + "  WHERE (FVersion = 1) AND (FUId IN (1)) AND (FAId_1 IN (11, 22, 33, 10))"
+                    + "  AND (FStatsDate >= 20240710) AND (FStatsDate <= 20240718)"
+                    + "  GROUP BY FUId, FAId_1, FStatsDate"
+                    + "  UNION ALL "
+                    + "  SELECT "
+                    + "  FUId AS advertiser_id,"
+                    + "  FAId_2 AS adgroup_id,"
+                    + "  FStatsDate AS date,"
+                    + "  SUM(clk_pv_2) AS valid_click_count,"
+                    + "  SUM(activation_pv_2) AS activated_count"
+                    + "  FROM " + tableName2
+                    + "  WHERE (FVersion = 1) AND (FUId IN (1)) AND (FAId_2 IN (11, 22, 33, 10))"
+                    + "  AND (FStatsDate >= 20240710) AND (FStatsDate <= 20240718)"
+                    + "  GROUP BY FUId, FAId_2, FStatsDate"
+                    + ")";
+
+            //Test group by orderPreserving
+            String sql = "SELECT ADVERTISER_ID AS advertiser_id,"
+                    + "ADGROUP_ID AS adgroup_id,"
+                    + "DATE AS i_date,"
+                    + "SUM(VALID_CLICK_COUNT) AS valid_click_count,"
+                    + "SUM(ACTIVATED_COUNT) AS activated_count "
+                    + "FROM "
+                    + orderedUnionSql
+                    + "GROUP BY ADVERTISER_ID, ADGROUP_ID, I_DATE "
+                    + "ORDER BY advertiser_id, adgroup_id, i_date "
+                    + "limit 10";
+            ClientAggregatePlan plan =(ClientAggregatePlan)TestUtil.getOptimizeQueryPlan(conn, sql);
+            assertTrue(plan.getGroupBy().isOrderPreserving());
+            UnionPlan unionPlan = (UnionPlan)((TupleProjectionPlan)(plan.getDelegate())).getDelegate();
+            assertTrue(unionPlan.isSupportOrderByOptimize());
+            assertTrue(unionPlan.iterator() instanceof MergeSortTopNResultIterator);
+            List<OrderBy> orderBys = unionPlan.getOutputOrderBys();
+            assertTrue(orderBys.size() == 1);
+            OrderBy orderBy = orderBys.get(0);
+            assertTrue(orderBy.getOrderByExpressions().size() == 3);
+            assertTrue(orderBy.getOrderByExpressions().get(0).toString().equals("ADVERTISER_ID"));
+            assertTrue(orderBy.getOrderByExpressions().get(1).toString().equals("DATE"));
+            assertTrue(orderBy.getOrderByExpressions().get(2).toString().equals("ADGROUP_ID"));
+
+            //Test group by orderPreserving for distinct
+            sql = "SELECT distinct ADVERTISER_ID AS advertiser_id,"
+                    + "ADGROUP_ID AS adgroup_id,"
+                    + "DATE AS i_date "
+                    + "FROM "
+                    + orderedUnionSql
+                    + "ORDER BY advertiser_id, adgroup_id, i_date "
+                    + "limit 10";
+            plan =(ClientAggregatePlan)TestUtil.getOptimizeQueryPlan(conn, sql);
+            assertTrue(plan.getGroupBy().isOrderPreserving());
+            unionPlan = (UnionPlan)((TupleProjectionPlan)(plan.getDelegate())).getDelegate();
+            assertTrue(unionPlan.isSupportOrderByOptimize());
+            assertTrue(unionPlan.iterator() instanceof MergeSortTopNResultIterator);
+            orderBys = unionPlan.getOutputOrderBys();
+            assertTrue(orderBys.size() == 1);
+            orderBy = orderBys.get(0);
+            assertTrue(orderBy.getOrderByExpressions().size() == 3);
+            assertTrue(orderBy.getOrderByExpressions().get(0).toString().equals("ADVERTISER_ID"));
+            assertTrue(orderBy.getOrderByExpressions().get(1).toString().equals("DATE"));
+            assertTrue(orderBy.getOrderByExpressions().get(2).toString().equals("ADGROUP_ID"));
+
+            //Test group by not orderPreserving
+            sql = "SELECT ADVERTISER_ID AS i_advertiser_id,"
+                    + "ADGROUP_ID AS i_adgroup_id,"
+                    + "SUM(VALID_CLICK_COUNT) AS valid_click_count,"
+                    + "SUM(ACTIVATED_COUNT) AS activated_count "
+                    + "FROM "
+                    + orderedUnionSql
+                    + "GROUP BY I_ADVERTISER_ID, ADGROUP_ID "
+                    + "ORDER BY i_adgroup_id "
+                    + "limit 10";
+            plan =(ClientAggregatePlan)TestUtil.getOptimizeQueryPlan(conn, sql);
+            assertTrue(!plan.getGroupBy().isOrderPreserving());
+            assertTrue(plan.getOrderBy() != OrderBy.FWD_ROW_KEY_ORDER_BY);
+            unionPlan = (UnionPlan)((TupleProjectionPlan)(plan.getDelegate())).getDelegate();
+            assertTrue(!unionPlan.isSupportOrderByOptimize());
+            assertTrue(!(unionPlan.iterator() instanceof MergeSortTopNResultIterator));
+            assertTrue(unionPlan.getOutputOrderBys().isEmpty());
+
+            //Test group by not orderPreserving
+            sql = "SELECT ADGROUP_ID AS adgroup_id,"
+                    + "DATE AS i_date,"
+                    + "SUM(VALID_CLICK_COUNT) AS valid_click_count,"
+                    + "SUM(ACTIVATED_COUNT) AS activated_count "
+                    + "FROM "
+                    + orderedUnionSql
+                    + "GROUP BY ADGROUP_ID, I_DATE "
+                    + "ORDER BY adgroup_id, i_date "
+                    + "limit 10";
+            plan =(ClientAggregatePlan)TestUtil.getOptimizeQueryPlan(conn, sql);
+            assertTrue(!plan.getGroupBy().isOrderPreserving());
+            assertTrue(plan.getOrderBy() == OrderBy.FWD_ROW_KEY_ORDER_BY);
+            unionPlan = (UnionPlan)((TupleProjectionPlan)(plan.getDelegate())).getDelegate();
+            assertTrue(!unionPlan.isSupportOrderByOptimize());
+            assertTrue(!(unionPlan.iterator() instanceof MergeSortTopNResultIterator));
+            assertTrue(unionPlan.getOutputOrderBys().isEmpty());
+
+            //Test group by orderPreserving with where
+            sql = "SELECT ADGROUP_ID AS adgroup_id,"
+                    + "DATE AS i_date,"
+                    + "SUM(VALID_CLICK_COUNT) AS valid_click_count,"
+                    + "SUM(ACTIVATED_COUNT) AS activated_count "
+                    + "FROM "
+                    + orderedUnionSql
+                    + " where advertiser_id = 1 "
+                    + "GROUP BY ADGROUP_ID, I_DATE "
+                    + "ORDER BY adgroup_id, i_date "
+                    + "limit 10";
+            plan =(ClientAggregatePlan)TestUtil.getOptimizeQueryPlan(conn, sql);
+            assertTrue(plan.getGroupBy().isOrderPreserving());
+            unionPlan = (UnionPlan)((TupleProjectionPlan)(plan.getDelegate())).getDelegate();
+            assertTrue(unionPlan.isSupportOrderByOptimize());
+            assertTrue(unionPlan.iterator() instanceof MergeSortTopNResultIterator);
+            orderBys = unionPlan.getOutputOrderBys();
+            assertTrue(orderBys.size() == 1);
+            orderBy = orderBys.get(0);
+            assertTrue(orderBy.getOrderByExpressions().size() == 3);
+            assertTrue(orderBy.getOrderByExpressions().get(0).toString().equals("ADVERTISER_ID"));
+            assertTrue(orderBy.getOrderByExpressions().get(1).toString().equals("DATE"));
+            assertTrue(orderBy.getOrderByExpressions().get(2).toString().equals("ADGROUP_ID"));
+
+            //Test order by orderPreserving
+            sql ="SELECT ADVERTISER_ID AS advertiser_id,"
+                    + "ADGROUP_ID AS adgroup_id,"
+                    + "DATE AS i_date,"
+                    + "VALID_CLICK_COUNT AS valid_click_count,"
+                    + "ACTIVATED_COUNT AS activated_count "
+                    + "FROM "
+                    + orderedUnionSql
+                    + "ORDER BY advertiser_id, i_date, adgroup_id "
+                    + "limit 10";
+            ClientScanPlan scanPlan =(ClientScanPlan)TestUtil.getOptimizeQueryPlan(conn, sql);
+            assertTrue(scanPlan.getOrderBy() == OrderBy.FWD_ROW_KEY_ORDER_BY);
+            unionPlan = (UnionPlan)((TupleProjectionPlan)(scanPlan.getDelegate())).getDelegate();
+            assertTrue(unionPlan.isSupportOrderByOptimize());
+            assertTrue(unionPlan.iterator() instanceof MergeSortTopNResultIterator);
+            orderBys = unionPlan.getOutputOrderBys();
+            assertTrue(orderBys.size() == 1);
+            orderBy = orderBys.get(0);
+            assertTrue(orderBy.getOrderByExpressions().size() == 3);
+            assertTrue(orderBy.getOrderByExpressions().get(0).toString().equals("ADVERTISER_ID"));
+            assertTrue(orderBy.getOrderByExpressions().get(1).toString().equals("DATE"));
+            assertTrue(orderBy.getOrderByExpressions().get(2).toString().equals("ADGROUP_ID"));
+
+            //Test order by not orderPreserving
+            sql ="SELECT ADVERTISER_ID AS advertiser_id,"
+                    + "ADGROUP_ID AS i_adgroup_id,"
+                    + "DATE AS date,"
+                    + "VALID_CLICK_COUNT AS valid_click_count,"
+                    + "ACTIVATED_COUNT AS activated_count "
+                    + "FROM "
+                    + orderedUnionSql
+                    + "ORDER BY advertiser_id, i_adgroup_id, date, valid_click_count "
+                    + "limit 10";
+            scanPlan =(ClientScanPlan)TestUtil.getOptimizeQueryPlan(conn, sql);
+            assertTrue(!scanPlan.getOrderBy().isEmpty());
+            unionPlan = (UnionPlan)((TupleProjectionPlan)(scanPlan.getDelegate())).getDelegate();
+            assertTrue(!unionPlan.isSupportOrderByOptimize());
+            assertTrue(!(unionPlan.iterator() instanceof MergeSortTopNResultIterator));
+            assertTrue(unionPlan.getOutputOrderBys().isEmpty());
+
+            //Test there is no order in union
+            sql ="SELECT ADVERTISER_ID AS advertiser_id,"
+                    + "ADGROUP_ID AS adgroup_id,"
+                    + "DATE AS i_date,"
+                    + "SUM(VALID_CLICK_COUNT) AS valid_click_count,"
+                    + "SUM(ACTIVATED_COUNT) AS activated_count "
+                    + "FROM "
+                    + "(SELECT FUId AS advertiser_id,"
+                    + "   FAId_1 AS adgroup_id,"
+                    + "   FStatsDate AS date,"
+                    + "   clk_pv_1 AS valid_click_count,"
+                    + "   activation_pv_1 AS activated_count"
+                    + "  FROM " + tableName1
+                    + "  WHERE (FVersion = 1) AND (FUId IN (1)) AND (FAId_1 IN (11, 22, 33, 10))"
+                    + "  AND (FStatsDate >= 20240710) AND (FStatsDate <= 20240718)"
+                    + "  UNION ALL "
+                    + "  SELECT "
+                    + "  FUId AS advertiser_id,"
+                    + "  FAId_2 AS adgroup_id,"
+                    + "  FStatsDate AS date,"
+                    + "  clk_pv_2 AS valid_click_count,"
+                    + "  activation_pv_2 AS activated_count"
+                    + "  FROM " + tableName2
+                    + "  WHERE (FVersion = 1) AND (FUId IN (1)) AND (FAId_2 IN (11, 22, 33, 10))"
+                    + "  AND (FStatsDate >= 20240710) AND (FStatsDate <= 20240718)"
+                    + ")"
+                    + "GROUP BY ADVERTISER_ID, ADGROUP_ID, I_DATE "
+                    + "ORDER BY advertiser_id, adgroup_id, i_date "
+                    + "limit 10";
+            plan =(ClientAggregatePlan)TestUtil.getOptimizeQueryPlan(conn, sql);
+            assertTrue(!plan.getGroupBy().isOrderPreserving());
+            unionPlan = (UnionPlan)((TupleProjectionPlan)(plan.getDelegate())).getDelegate();
+            assertTrue(!unionPlan.isSupportOrderByOptimize());
+            assertTrue(!(unionPlan.iterator() instanceof MergeSortTopNResultIterator));
+            assertTrue(unionPlan.getOutputOrderBys().isEmpty());
+
+            //Test alias not inconsistent in union
+            sql ="SELECT ADVERTISER_ID AS advertiser_id,"
+                    + "ADGROUP_ID_1 AS adgroup_id,"
+                    + "DATE AS i_date,"
+                    + "SUM(VALID_CLICK_COUNT) AS valid_click_count,"
+                    + "SUM(ACTIVATED_COUNT) AS activated_count "
+                    + "FROM "
+                    + "(SELECT FUId AS advertiser_id,"
+                    + "   FAId_1 AS adgroup_id_1,"
+                    + "   FStatsDate AS date,"
+                    + "   SUM(clk_pv_1) AS valid_click_count,"
+                    + "   SUM(activation_pv_1) AS activated_count"
+                    + "  FROM " + tableName1
+                    + "  WHERE (FVersion = 1) AND (FUId IN (1)) AND (FAId_1 IN (11, 22, 33, 10))"
+                    + "  AND (FStatsDate >= 20240710) AND (FStatsDate <= 20240718)"
+                    + "  GROUP BY FUId, FAId_1, FStatsDate"
+                    + "  UNION ALL "
+                    + "  SELECT "
+                    + "  FUId AS advertiser_id,"
+                    + "  FAId_2,"
+                    + "  FStatsDate AS date,"
+                    + "  SUM(clk_pv_2),"
+                    + "  SUM(activation_pv_2)"
+                    + "  FROM " + tableName2
+                    + "  WHERE (FVersion = 1) AND (FUId IN (1)) AND (FAId_2 IN (11, 22, 33, 10))"
+                    + "  AND (FStatsDate >= 20240710) AND (FStatsDate <= 20240718)"
+                    + "  GROUP BY FUId, FAId_2, FStatsDate"
+                    + ")"
+                    + "GROUP BY ADVERTISER_ID, ADGROUP_ID_1, I_DATE "
+                    + "ORDER BY advertiser_id, adgroup_id, i_date "
+                    + "limit 10";
+            plan =(ClientAggregatePlan)TestUtil.getOptimizeQueryPlan(conn, sql);
+            assertTrue(plan.getGroupBy().isOrderPreserving());
+            unionPlan = (UnionPlan)((TupleProjectionPlan)(plan.getDelegate())).getDelegate();
+            assertTrue(unionPlan.isSupportOrderByOptimize());
+            assertTrue(unionPlan.iterator() instanceof MergeSortTopNResultIterator);
+            orderBys = unionPlan.getOutputOrderBys();
+            assertTrue(orderBys.size() == 1);
+            orderBy = orderBys.get(0);
+            assertTrue(orderBy.getOrderByExpressions().size() == 3);
+            assertTrue(orderBy.getOrderByExpressions().get(0).toString().equals("ADVERTISER_ID"));
+            assertTrue(orderBy.getOrderByExpressions().get(1).toString().equals("DATE"));
+            assertTrue(orderBy.getOrderByExpressions().get(2).toString().equals("ADGROUP_ID_1"));
+
+            //Test order by column not equals in union
+            sql = "SELECT ADVERTISER_ID AS advertiser_id,"
+                    + "ADGROUP_ID AS adgroup_id,"
+                    + "DATE AS i_date,"
+                    + "SUM(VALID_CLICK_COUNT) AS valid_click_count,"
+                    + "SUM(ACTIVATED_COUNT) AS activated_count "
+                    + "FROM "
+                    + "(SELECT FUId AS advertiser_id,"
+                    + "   FAId_1 AS adgroup_id,"
+                    + "   FStatsDate AS date,"
+                    + "   SUM(clk_pv_1) AS valid_click_count,"
+                    + "   SUM(activation_pv_1) AS activated_count"
+                    + "  FROM " + tableName1
+                    + "  WHERE (FVersion = 1) AND (FUId IN (1)) AND (FAId_1 IN (11, 22, 33, 10))"
+                    + "  AND (FStatsDate >= 20240710) AND (FStatsDate <= 20240718)"
+                    + "  GROUP BY FUId, FAId_1, FStatsDate"
+                    + "  UNION ALL "
+                    + "  SELECT "
+                    + "  FUId AS advertiser_id,"
+                    + "  FAId_2 AS adgroup_id,"
+                    + "  cast (0 as UNSIGNED_LONG)  AS date,"
+                    + "  SUM(clk_pv_2) AS valid_click_count,"
+                    + "  SUM(activation_pv_2) AS activated_count"
+                    + "  FROM " + tableName2
+                    + "  WHERE (FVersion = 1) AND (FUId IN (1)) AND (FAId_2 IN (11, 22, 33, 10))"
+                    + "  AND (FStatsDate >= 20240710) AND (FStatsDate <= 20240718)"
+                    + "  GROUP BY FUId, FAId_2"
+                    + ")"
+                    + "GROUP BY ADVERTISER_ID, ADGROUP_ID, I_DATE "
+                    + "ORDER BY advertiser_id, adgroup_id, i_date "
+                    + "limit 10";
+            plan =(ClientAggregatePlan)TestUtil.getOptimizeQueryPlan(conn, sql);
+            assertTrue(!plan.getGroupBy().isOrderPreserving());
+            unionPlan = (UnionPlan)((TupleProjectionPlan)(plan.getDelegate())).getDelegate();
+            assertTrue(!unionPlan.isSupportOrderByOptimize());
+            assertTrue(!(unionPlan.iterator() instanceof MergeSortTopNResultIterator));
+            assertTrue(unionPlan.getOutputOrderBys().isEmpty());
+
+            //Test only union
+            sql = orderedUnionSql.substring(1, orderedUnionSql.length()-1);
+            unionPlan =(UnionPlan)TestUtil.getOptimizeQueryPlan(conn, sql);
+            assertTrue(!unionPlan.isSupportOrderByOptimize());
+            assertTrue(!(unionPlan.iterator() instanceof MergeSortTopNResultIterator));
+            assertTrue(unionPlan.getOutputOrderBys().isEmpty());
+
+            //Test only union and order by match
+            sql = orderedUnionSql.substring(1, orderedUnionSql.length()-1) + " order by advertiser_id, date, adgroup_id";
+            unionPlan =(UnionPlan)TestUtil.getOptimizeQueryPlan(conn, sql);
+            assertTrue(!unionPlan.isSupportOrderByOptimize());
+            assertTrue(unionPlan.iterator() instanceof MergeSortTopNResultIterator);
+            assertTrue(unionPlan.getSubPlans().stream().allMatch(
+                    p -> p.getOrderBy() == OrderBy.FWD_ROW_KEY_ORDER_BY));
+            orderBys = unionPlan.getOutputOrderBys();
+            assertTrue(orderBys.size() == 1);
+            orderBy = orderBys.get(0);
+            assertTrue(orderBy.getOrderByExpressions().size() == 3);
+            assertTrue(orderBy.getOrderByExpressions().get(0).toString().equals("ADVERTISER_ID"));
+            assertTrue(orderBy.getOrderByExpressions().get(1).toString().equals("DATE"));
+            assertTrue(orderBy.getOrderByExpressions().get(2).toString().equals("ADGROUP_ID"));
+
+            //Test only union and order by not match
+            sql = orderedUnionSql.substring(1, orderedUnionSql.length()-1) +
+                    " order by advertiser_id, date, adgroup_id, valid_click_count";
+            unionPlan =(UnionPlan)TestUtil.getOptimizeQueryPlan(conn, sql);
+            assertTrue(!unionPlan.isSupportOrderByOptimize());
+            assertTrue(unionPlan.iterator() instanceof MergeSortTopNResultIterator);
+            assertTrue(unionPlan.getSubPlans().stream().noneMatch(
+                    p -> p.getOrderBy() == OrderBy.FWD_ROW_KEY_ORDER_BY));
+            orderBys = unionPlan.getOutputOrderBys();
+            assertTrue(orderBys.size() == 1);
+            orderBy = orderBys.get(0);
+            assertTrue(orderBy.getOrderByExpressions().size() == 4);
+            assertTrue(orderBy.getOrderByExpressions().get(0).toString().equals("ADVERTISER_ID"));
+            assertTrue(orderBy.getOrderByExpressions().get(1).toString().equals("DATE"));
+            assertTrue(orderBy.getOrderByExpressions().get(2).toString().equals("ADGROUP_ID"));
+            assertTrue(orderBy.getOrderByExpressions().get(3).toString().equals("VALID_CLICK_COUNT"));
+        }
+    }
 }

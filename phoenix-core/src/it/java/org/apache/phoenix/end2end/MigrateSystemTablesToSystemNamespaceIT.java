@@ -16,6 +16,7 @@
  */
 package org.apache.phoenix.end2end;
 
+import static org.apache.hadoop.hbase.coprocessor.CoprocessorHost.REGIONSERVER_COPROCESSOR_CONF_KEY;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
@@ -41,10 +42,12 @@ import org.apache.hadoop.hbase.HBaseTestingUtility;
 import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.TableName;
 import org.apache.hadoop.security.UserGroupInformation;
-import org.apache.phoenix.coprocessor.MetaDataProtocol;
+import org.apache.phoenix.coprocessor.PhoenixRegionServerEndpoint;
+import org.apache.phoenix.coprocessorclient.MetaDataProtocol;
 import org.apache.phoenix.exception.UpgradeInProgressException;
 import org.apache.phoenix.jdbc.PhoenixConnection;
 import org.apache.phoenix.jdbc.PhoenixDatabaseMetaData;
+import org.apache.phoenix.jdbc.PhoenixTestDriver;
 import org.apache.phoenix.query.BaseTest;
 import org.apache.phoenix.query.ConnectionQueryServices;
 import org.apache.phoenix.query.ConnectionQueryServicesImpl;
@@ -54,6 +57,7 @@ import org.apache.phoenix.schema.PTableType;
 import org.apache.phoenix.util.ReadOnlyProps;
 import org.apache.phoenix.util.SchemaUtil;
 import org.junit.After;
+import org.junit.BeforeClass;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
 
@@ -62,10 +66,12 @@ public class MigrateSystemTablesToSystemNamespaceIT extends BaseTest {
 
     private static final Set<String> PHOENIX_SYSTEM_TABLES = new HashSet<>(Arrays.asList(
             "SYSTEM.CATALOG", "SYSTEM.SEQUENCE", "SYSTEM.STATS", "SYSTEM.FUNCTION",
-            "SYSTEM.MUTEX","SYSTEM.LOG", "SYSTEM.CHILD_LINK", "SYSTEM.TASK", "SYSTEM.TRANSFORM"));
+            "SYSTEM.MUTEX","SYSTEM.LOG", "SYSTEM.CHILD_LINK", "SYSTEM.TASK", "SYSTEM.TRANSFORM",
+            "SYSTEM.CDC_STREAM_STATUS", "SYSTEM.CDC_STREAM"));
     private static final Set<String> PHOENIX_NAMESPACE_MAPPED_SYSTEM_TABLES = new HashSet<>(
             Arrays.asList("SYSTEM:CATALOG", "SYSTEM:SEQUENCE", "SYSTEM:STATS", "SYSTEM:FUNCTION",
-                    "SYSTEM:MUTEX","SYSTEM:LOG", "SYSTEM:CHILD_LINK", "SYSTEM:TASK", "SYSTEM:TRANSFORM"));
+                    "SYSTEM:MUTEX","SYSTEM:LOG", "SYSTEM:CHILD_LINK", "SYSTEM:TASK", "SYSTEM:TRANSFORM",
+                    "SYSTEM:CDC_STREAM_STATUS", "SYSTEM:CDC_STREAM"));
     private static final String SCHEMA_NAME = "MIGRATETEST";
     private static final String TABLE_NAME =
             SCHEMA_NAME + "." + MigrateSystemTablesToSystemNamespaceIT.class.getSimpleName().toUpperCase();
@@ -85,9 +91,15 @@ public class MigrateSystemTablesToSystemNamespaceIT extends BaseTest {
     final UserGroupInformation user4 =
             UserGroupInformation.createUserForTesting("user4", new String[0]);
 
+    @BeforeClass
+    public static synchronized void registerTestDriver() throws SQLException {
+        DriverManager.registerDriver(new PhoenixTestDriver());
+    }
+
     public final void doSetup(boolean systemMappingEnabled) throws Exception {
         testUtil = new HBaseTestingUtility();
         Configuration conf = testUtil.getConfiguration();
+        conf.set(REGIONSERVER_COPROCESSOR_CONF_KEY, PhoenixRegionServerEndpointTestImpl.class.getName());
         enableNamespacesOnServer(conf, systemMappingEnabled);
         configureRandomHMasterPort(conf);
         testUtil.startMiniCluster(1);
@@ -98,6 +110,7 @@ public class MigrateSystemTablesToSystemNamespaceIT extends BaseTest {
         try {
             if (testUtil != null) {
                 boolean refCountLeaked = isAnyStoreRefCountLeaked();
+                ServerMetadataCacheTestImpl.resetCache();
                 testUtil.shutdownMiniCluster();
                 testUtil = null;
                 assertFalse("refCount leaked", refCountLeaked);
@@ -317,7 +330,7 @@ public class MigrateSystemTablesToSystemNamespaceIT extends BaseTest {
 
     private Set<String> getHBaseTables() throws IOException {
         Set<String> tables = new HashSet<>();
-        for (TableName tn : testUtil.getHBaseAdmin().listTableNames()) {
+        for (TableName tn : testUtil.getAdmin().listTableNames()) {
             tables.add(tn.getNameAsString());
         }
         return tables;
